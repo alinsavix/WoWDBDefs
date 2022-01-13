@@ -315,6 +315,31 @@ def parse_dbd_directory(path: str) -> DbdDirectory:
 
     return dbds
 
+
+import pickle
+def load_directory_cached(path: str, skip_cache: bool = False, silent: bool = False) -> DbdDirectory:
+    dbds = None
+    pickle_path = os.path.join(path, ".dbd.pickle")
+    if not skip_cache and os.path.exists(pickle_path):
+        if not silent:
+            print("NOTICE: Reading pickled dbd data from disk", file=sys.stderr)
+        with open(pickle_path, "rb") as f:
+            try:
+                dbds = pickle.load(f)
+            except Exception as e:
+                if not silent:
+                    print("WARNING: failed to read pickled data from disk", file=sys.stderr)
+
+    if dbds is None:
+        if not silent:
+            print("NOTICE: Directly parsing dbd data and pickling to disk", file=sys.stderr)
+        dbds = parse_dbd_directory(path)
+        if not skip_cache:
+            with open(pickle_path, "wb") as f:
+                pickle.dump(dbds, f)
+
+    return dbds
+
 # def get_versioned_view(tables: Dict[str, DbdFileData], build: BuildIdOrTuple) -> Dict[str, DbdVersionedCols]:
 #     view: Dict[str, DbdVersionedCols] = {}
 #     if isinstance(build, tuple):

@@ -69,7 +69,11 @@ def coltype_string(column: dbdwrapper.DbdVersionedCol) -> str:
     # but most/all seem to be on the global column def, so ... just use that.
     comments = ""
     if column.definition.comment is not None:
-        comments = column.definition.comment.replace("'", "\\'")
+        comments = column.definition.comment.replace("\\", "\\\\")
+        comments = comments.replace("'", "\\'")
+
+        if len(comments) > 500:
+            comments = "see comment in .dbd file"
 
     sql_comment_string = ""
     if annotations or comments:
@@ -79,6 +83,7 @@ def coltype_string(column: dbdwrapper.DbdVersionedCol) -> str:
             sql_comment_string = f" COMMENT '{comments}{annotations}'"
 
     if column.definition.type == "int":
+        # return f"  `{column.name}` INT UNSIGNED"
         assert column.int_width is not None
         int_string = int_sizemap.get(column.int_width, "INT")
         if column.is_unsigned:
@@ -234,23 +239,7 @@ def main() -> int:
     # else:
     #   dbds = dbd.parse_dbd_directory(args.definitions)
 
-    dbds = None
-    if not args.no_pickle and os.path.exists(os.path.join(args.definitions, "dbd_to_mysql.pickle")):
-        # FIXME: Can we make pickling (or other caching) automatic in dbdwrapper?
-        errout("NOTICE: Reading pickled dbd data from disk")
-        with open(os.path.join(args.definitions, "dbd_to_mysql.pickle"), "rb") as f:
-            try:
-                dbds = pickle.load(f)
-            except Exception as e:
-                errout("WARNING: failed to read pickled data from disk")
-
-    if dbds is None:
-        errout("NOTICE: Directly parsing dbd data and pickling to disk")
-        dbds = dbdwrapper.parse_dbd_directory(args.definitions)
-        if not args.no_pickle:
-            with open(os.path.join(args.definitions, "dbd_to_mysql.pickle"), "wb") as f:
-                pickle.dump(dbds, f)
-
+    dbds = dbdwrapper.load_directory_cached(args.definitions)
     build = dbdwrapper.BuildId.from_string(args.build)
     view = dbds.get_view(build)
     fkcols = get_fk_cols(dbds)  # foreign key columns
