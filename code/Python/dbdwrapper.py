@@ -11,6 +11,16 @@ from typing import (Any, Dict, List, Literal, Optional, Set, Tuple, Type,
 import dbd
 from ppretty import ppretty
 
+def table_namecheck(table: str) -> str:
+    if table == "SoundEntries":
+        # print(f"TABLE SoundEntries -> SoundKit")
+        return "SoundKit"
+
+    # else
+    # print(f"TABLE {table} (unchanged)")
+    return table
+
+
 BuildIdOrTuple = Union['BuildId', Tuple[int, int, int, int]]
 
 @dataclass(init=True, repr=True, eq=True, frozen=True)
@@ -205,7 +215,7 @@ class DbdColumnDef:
             is_confirmed_name=src.is_confirmed_name,
             comment=src.comment,
             fk=None if not src.foreign else DbdForeignKey(
-                table=str(src.foreign.table),
+                table=table_namecheck(str(src.foreign.table)),
                 column=str(src.foreign.column)
             )
         )
