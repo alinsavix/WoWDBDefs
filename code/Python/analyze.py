@@ -24,6 +24,9 @@ def compare_data(table_name: str, col: str, info: Dict[str, Any],
 
     diffs: Set[str] = set()
 
+    if f"{table_name}.{col}" in fkcols:
+        diffs.add("REFERENT")
+
     if coldata.definition.type == "int":
         if "INT" not in tags:
             diffs.add("TYPE_SHOULD_BE_INT")
