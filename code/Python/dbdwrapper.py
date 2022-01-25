@@ -4,27 +4,52 @@ import dataclasses
 import os
 import re
 import sys
+from collections import UserDict, UserList
 from dataclasses import dataclass
 from typing import (Any, Dict, List, Literal, Optional, Set, Tuple, Type,
                     TypeVar, Union)
+import pickle
 
 import dbd
 from ppretty import ppretty
 
-def table_namecheck(table: str) -> str:
+BuildIdOrTuple = Union['BuildId', Tuple[int, int, int, int]]
+DbdBuildOrRange = Union[dbd.build_version, Tuple[dbd.build_version, dbd.build_version]]
+DbdVersionedView = Dict[str, 'DbdVersionedCols']
+
+
+# a stupid function to make it easier to replace FKs that point at SoundEntries
+# with FKs that point at SoundKit instead, since that table was renamed at some
+# point and the DBD format doesn't allow for versioning of that information.
+def table_fk_namecheck(table: str) -> str:
     if table == "SoundEntries":
-        # print(f"TABLE SoundEntries -> SoundKit")
         return "SoundKit"
 
     # else
-    # print(f"TABLE {table} (unchanged)")
     return table
 
 
-BuildIdOrTuple = Union['BuildId', Tuple[int, int, int, int]]
+# Data structures for DBD data
+# Most are direct analogues to the data structures returned by the dbd parser,
+# but with less of the cruft that comes from that, and a bit of restructuring
+# of the information to make it easier to work with. Most of these have a
+# from_dbd() method that directly converts data from the matching parser
+# structure.
+@dataclass(init=True, repr=True)
+class DbdForeignKey:
+    table: str
+    column: str
+
 
 @dataclass(init=True, repr=True, eq=True, frozen=True)
 class BuildId:
+    """
+    A data class that encapsulates a WoW build number, in
+    <major>.<minor>.<patch>.<build> format. Maps to the values used
+    by dbd.definitions.builds[build_version]
+
+    :raises ValueError: The build string supplied
+    """
     major: int
     minor: int
     patch: int
@@ -56,6 +81,9 @@ class BuildId:
             build=int(build)
         )
 
+    #
+    # dunder methods to allow for comparing BuildIds
+    #
     @staticmethod
     def build_compare(buildid1: 'BuildId', buildid2: 'BuildId') -> int:
         if buildid1.major != buildid2.major:
@@ -65,15 +93,6 @@ class BuildId:
         if buildid1.patch != buildid2.patch:
             return buildid1.patch - buildid2.patch
         return buildid1.build - buildid2.build
-
-    # def __eq__(self, other: object) -> bool:
-    #     if not isinstance(other, BuildId) and not isinstance(other, tuple):
-    #         return NotImplemented
-
-    #     if isinstance(other, tuple):
-    #         other = BuildId(*other)
-
-    #     return BuildId.build_compare(self, other) == 0
 
     def __lt__(self, other: BuildIdOrTuple) -> bool:
         if not isinstance(other, BuildId):
@@ -103,10 +122,12 @@ class BuildId:
         return f"{self.major}.{self.minor}.{self.patch}.{self.build}"
 
 
-BuildIdOrRange = Union[dbd.build_version, Tuple[dbd.build_version, dbd.build_version]]
-
 @dataclass(init=True, repr=True, frozen=True)
 class BuildIdRange:
+    """
+    A data class that encapsulates a range of WoW build numbers. Includes a
+    __contains__ method to allow for "if builid in buildrange" type logic.
+    """
     min: BuildId
     max: BuildId
 
@@ -117,7 +138,7 @@ class BuildIdRange:
         return f"{self.min}-{self.max}"
 
     @classmethod
-    def from_dbd(cls, build: BuildIdOrRange) -> 'BuildIdRange':
+    def from_dbd(cls, build: DbdBuildOrRange) -> 'BuildIdRange':
         if isinstance(build, dbd.build_version):
             bb = BuildId.from_dbd(build)
             r = cls(bb, bb)
@@ -129,17 +150,19 @@ class BuildIdRange:
         return r
 
 
-
-from collections import UserDict, UserList
-
-
 # a build id dict that you can retrieve from via specific build number.
 # works similarly to https://stackoverflow.com/a/39358140/9404062
-class DbdBuilds(UserDict[BuildIdRange, 'DbdVersionedCols']):
-    # FIXME: consider using 'bisect' for faster lookups
-    # (see https://stackoverflow.com/a/39358118/9404062)
+# FIXME: consider using 'bisect' for faster lookups (see previous link)
+class DbdBuilds(UserDict['BuildIdRange', 'DbdVersionedCols']):
+    """
+    A dict of build-specific DBD data, indexed by BuildId/BuildIdRange
+    values. Do a lookup using a BuildId to find a build range into which
+    that BuildId fits; do a lookup using a BuildIdRange to find an exact
+    match to that range, if there is one.
+    """
     def __contains__(self, key: object) -> bool:
-        # if it's a range, behave like a normal dict
+        # if it's a range, behave like a normal dict, and find only an
+        # exact match to the range.
         if isinstance(key, BuildIdRange):
             if key in self.data:
                 return True
@@ -147,7 +170,7 @@ class DbdBuilds(UserDict[BuildIdRange, 'DbdVersionedCols']):
                 return False
 
         # if a specific version (or a string that might be one), check
-        # to see if there's a range
+        # to see if there's a match.
         if isinstance(key, str) or isinstance(key, BuildId):
             try:
                 self.__getitem__(key)
@@ -163,22 +186,21 @@ class DbdBuilds(UserDict[BuildIdRange, 'DbdVersionedCols']):
         if isinstance(key, str):
             key = BuildId.from_dbd(dbd.build_version(key))
 
-        # print(f"resolving for key: {key}")
+        # search through the dict, find a range that contains the specific
+        # build requested.
         if isinstance(key, BuildId):
             for k, v in self.data.items():
-                # print(f"checking key vs {k} ")
                 if key in k:
                     return v
 
         raise KeyError(key)
-        # return None
 
     @classmethod
     def from_dbd(cls, src: List[dbd.definitions], definitions: 'DbdColumnDefs') -> 'DbdBuilds':
         dbd_builds = cls()
 
         for dbd_def in src:
-            # get our versioned column list built once per def
+            # get our versioned column list once per def
             c = DbdVersionedCols.from_dbd(dbd_def.entries, definitions)
 
             # Now add all the builds, pointing at this specific def
@@ -191,21 +213,18 @@ class DbdBuilds(UserDict[BuildIdRange, 'DbdVersionedCols']):
 
 
 @dataclass(init=True, repr=True)
-class DbdForeignKey:
-    table: str
-    column: str
-
-
-# holds info from dbd_file.columns, which is the global information for
-# columns in the database. We'll reference this a bunch when building
-# other structures
-@dataclass(init=True, repr=True)
 class DbdColumnDef:
+    """
+    Data class for the "global" definition of a single data column, matching
+    with the top level .columns structure in the dbd parser output. Information
+    found here is global to all builds.
+
+    """
     name: str
     type: Literal["string", "locstring", "int", "float"]
     is_confirmed_name: bool
     comment: Optional[str] = None
-    fk: Optional[DbdForeignKey] = None
+    fk: Optional['DbdForeignKey'] = None
 
     @classmethod
     def from_dbd(cls, src: dbd.column_definition):
@@ -215,13 +234,17 @@ class DbdColumnDef:
             is_confirmed_name=src.is_confirmed_name,
             comment=src.comment,
             fk=None if not src.foreign else DbdForeignKey(
-                table=table_namecheck(str(src.foreign.table)),
+                table=table_fk_namecheck(str(src.foreign.table)),
                 column=str(src.foreign.column)
             )
         )
 
 
 class DbdColumnDefs(UserDict[str, DbdColumnDef]):
+    """
+    Data class holding an entire set of global column definitions (i.e. a
+    table), indexed by column name.
+    """
     @classmethod
     def from_dbd(cls, src: List[dbd.column_definition]) -> 'DbdColumnDefs':
         defs = cls()
@@ -233,8 +256,12 @@ class DbdColumnDefs(UserDict[str, DbdColumnDef]):
 
 @dataclass(init=True, repr=True)
 class DbdVersionedCol:
+    """
+    Data class for a single column definition for a specific build. This is
+    where most of the "meat" of the data is.
+    """
     name: str
-    definition: DbdColumnDef
+    definition: 'DbdColumnDef'  # FIXME: Just roll this data in?
     annotation: Set[str] = dataclasses.field(default_factory=set)
     array_size: Optional[int] = None
     comment: Optional[str] = None
@@ -242,7 +269,7 @@ class DbdVersionedCol:
     is_unsigned: bool = True
 
     @classmethod
-    def from_dbd(cls, src: dbd.definition_entry, definition: DbdColumnDef) -> 'DbdVersionedCol':
+    def from_dbd(cls, src: dbd.definition_entry, definition: 'DbdColumnDef') -> 'DbdVersionedCol':
         return cls(
             name=src.column,
             definition=definition,
@@ -255,6 +282,10 @@ class DbdVersionedCol:
 
 
 class DbdVersionedCols(UserDict[str, DbdVersionedCol]):
+    """
+    Data class holding an entire set of versioned (build-specific) column
+    definitions (i.e. a table), indexed by column name.
+    """
     @classmethod
     def from_dbd(cls, src: List[dbd.definition_entry], definitions: DbdColumnDefs) -> 'DbdVersionedCols':
         cols = cls()
@@ -264,26 +295,15 @@ class DbdVersionedCols(UserDict[str, DbdVersionedCol]):
         return cols
 
 
-# @dataclass(init=True, repr=True)
-# class DbdVersionDef:
-#     builds: List[BuildId]
-#     comments: List[str] = dataclasses.field(default_factory=list)
-
-
-# def dbdparse(filename: str) -> None:
-#     with open(filename) as file:
-#         lines = file.readlines()
-
-#     lines = [line.rstrip() for line in lines]
-#     lines = [line for line in lines if line]
-
-#     # print(ppretty(lines))
-#     parse_cols(lines)
-
 @dataclass(init=True, repr=True)
 class DbdFileData:
-    columns: DbdColumnDefs
-    definitions: DbdBuilds
+    """
+    Data class holding all of the parsed data from a single dbd file, for all
+    build versions, plus the global definitions. This maps fairly directly
+    to the top level data structure created by the dbd parser itself.
+    """
+    columns: 'DbdColumnDefs'
+    definitions: 'DbdBuilds'
 
     @classmethod
     def from_dbd(cls, src: dbd.dbd_file):
@@ -293,14 +313,28 @@ class DbdFileData:
             definitions=DbdBuilds.from_dbd(src.definitions, definitions)
         )
 
-# def dbds(dbd_file: dbd.dbd_file) -> 'DBData':
-#     pass
 
-
-DbdVersionedView = Dict[str, DbdVersionedCols]
 class DbdDirectory(UserDict[str, DbdFileData]):
+    """
+    Data class holding the parsed data for an entire directory full of dbd
+    files (most commonly "all the dbd files") for all builds, indexed by
+    table name.
+    """
     def get_view(self, build: BuildIdOrTuple) -> DbdVersionedView:
-        view: DbdVersionedView = {}
+        """
+        Get a single view of the data for a specific BuildId. Tables and
+        columns that do not exist in the requested build are not included.
+        This is the data structure most software will work with directly,
+        since most software only cares about a single build at once, and
+        this is the simplest way to get at build-specific data without a lot
+        of fluff.
+
+        :param build: A BuildId structure or a tuple of (major, minor, patch, build)
+        :type build: BuildIdOrTuple
+        :return: A 'view' of the DBD data for the requested build.
+        :rtype: DbdVersionedView
+        """
+        view: 'DbdVersionedView' = {}
         if isinstance(build, tuple):
             build = BuildId.from_tuple(build)
 
@@ -311,12 +345,31 @@ class DbdDirectory(UserDict[str, DbdFileData]):
 
         return view
 
-def parse_dbd_file(filename: str) -> DbdFileData:
+
+def parse_dbd_file(filename: str) -> 'DbdFileData':
+    """
+    Parse a single DBD file using the DBD parser, and return the resulting
+    data in a useful form.
+
+    :param filename: filename of the DBD file to parse
+    :type filename: str
+    :return: The parsed data for a single dbd file
+    :rtype: DbdFileData
+    """
     dbf = dbd.parse_dbd_file(filename)
     return DbdFileData.from_dbd(dbf)
 
 
 def parse_dbd_directory(path: str) -> DbdDirectory:
+    """
+    Parse an entire directory of DBD files using the DBD parser, and return
+    the resulting data in a useful form.
+
+    :param path: The directory from which to parse all DBD files
+    :type path: str
+    :return: The parsed data for a directory of DBD files
+    :rtype: DbdDirectory
+    """
     dbds = DbdDirectory()
 
     for file in os.listdir(path):
@@ -326,41 +379,56 @@ def parse_dbd_directory(path: str) -> DbdDirectory:
     return dbds
 
 
-import pickle
-def load_directory_cached(path: str, skip_cache: bool = False, silent: bool = False) -> DbdDirectory:
+def load_directory_cached(path: str, skip_cache: bool = False,
+                          refresh_cache: bool = False, silent: bool = False) -> 'DbdDirectory':
+    """
+    Load a directory of DBD files, and cache the result in a file. The cache file
+    is placed in the DBD directory under the name ".dbd.pickle". If the cache is
+    already present, and if skip_cache is False, the cache file is loaded and
+    returned instead of re-parsing all the dbd files (for about a 50x speedup).
+    The cache will *not* be automatically refreshed if stale; to force a refresh,
+    use the refresh_cache parameter. A fresh cache will not be created if
+    skip_cache is true.
+
+    :param path: The directory from which DBD files will be parsed/loaded
+    :type path: str
+    :param skip_cache: don't load or write the on-disk cache, and re-parse all files instead, defaults to False
+    :type skip_cache: bool, optional
+    :param refresh_cache: force a refresh of the on-disk cache, re-parsing all files and caching the results, defaults to False
+    :type refresh_cache: bool, optional
+    :param silent: don't output status messages about loading/parsing/caching, defaults to False
+    :type silent: bool, optional
+    :return: The parsed data for a directory of DBD files
+    :rtype: DbdDirectory
+    """
+    def optional_print(msg: str):
+        if not silent:
+            print(msg, file=sys.stderr)
+
     dbds = None
     pickle_path = os.path.join(path, ".dbd.pickle")
-    if not skip_cache and os.path.exists(pickle_path):
-        if not silent:
-            print("NOTICE: Reading pickled dbd data from disk", file=sys.stderr)
-        with open(pickle_path, "rb") as f:
-            try:
-                dbds = pickle.load(f)
-            except Exception as e:
-                if not silent:
-                    print("WARNING: failed to read pickled data from disk", file=sys.stderr)
+
+    if os.path.exists(pickle_path) and not skip_cache:
+        if refresh_cache:
+            optional_print("NOTICE: Refreshing DBD file cache, not using existing cache")
+        else:
+            optional_print("NOTICE: Reading pickled dbd data from disk")
+
+            with open(pickle_path, "rb") as f:
+                try:
+                    dbds = pickle.load(f)
+                except Exception as e:
+                    optional_print("WARNING: failed to read pickled data from disk")
 
     if dbds is None:
-        if not silent:
-            print("NOTICE: Directly parsing dbd data and pickling to disk", file=sys.stderr)
+        optional_print("NOTICE: No (valid) cache available, directly parsing dbd data")
+
         dbds = parse_dbd_directory(path)
         if not skip_cache:
             with open(pickle_path, "wb") as f:
                 pickle.dump(dbds, f)
 
     return dbds
-
-# def get_versioned_view(tables: Dict[str, DbdFileData], build: BuildIdOrTuple) -> Dict[str, DbdVersionedCols]:
-#     view: Dict[str, DbdVersionedCols] = {}
-#     if isinstance(build, tuple):
-#         build = BuildId.from_tuple(build)
-
-#     for table, tabledef in tables.items():
-#         builds = tabledef.definitions
-#         if build in builds:
-#             view[table] = builds[build]
-
-#     return view
 
 
 if __name__ == "__main__":
@@ -388,8 +456,5 @@ if __name__ == "__main__":
 
     v = d.get_view(b)
     print(ppretty(v))
-
-    # for t in d.keys():
-    #     print(ppretty(d[t].definitions[b]))
 
     sys.exit(0)

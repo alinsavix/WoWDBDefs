@@ -1,6 +1,6 @@
 #! /usr/bin/env python
-
-from modgrammar import *
+# requires python 3.7 or newer
+from modgrammar import L, Grammar, WORD, OPTIONAL, SPACE, REST_OF_LINE, G, LIST_OF, ONE_OR_MORE, EOL, REPEAT, ZERO_OR_MORE, EOF
 from itertools import chain
 import os
 import codecs
@@ -32,6 +32,8 @@ import codecs
 #         .comment: string
 
 
+file_suffix = ".dbd"
+
 def parse_dbd(content):
     return dbd_parser.parse_string(content)
 
@@ -41,17 +43,14 @@ def parse_dbd_file(path):
         with codecs.open(path, encoding=u'utf-8') as f:
             return parse_dbd(f.read())
     except Exception as ex:
-        raise Exception(u'failed to parse dbd file "{}": {}'.format (path, ex))
-
-
-file_suffix = ".dbd"
+        raise Exception(u'failed to parse dbd file "{}": {}'.format(path, ex))
 
 
 def parse_dbd_directory(path):
     dbds = {}
     for file in os.listdir(path):
         if file.endswith(file_suffix):
-            dbds[file[:-len(file_suffix)]] = parse_dbd_file(os.path.join(path,file))
+            dbds[file[:-len(file_suffix)]] = parse_dbd_file(os.path.join(path, file))
     return dbds
 
 
@@ -87,7 +86,7 @@ class comma_list_separator(Grammar):
 
 
 class foreign_identifier (Grammar):
-    #! \todo table is not actually a identifier, but table_name?
+    # todo: table is not actually a identifier, but table_name?
     grammar = (L("<"), identifier, L("::"), identifier, L(">"))
 
     def grammar_elem_init(self, sessiondata):
@@ -101,11 +100,11 @@ def stru(elem):
     return u'{}'.format(elem)
 
 class column_definition (Grammar):
-    grammar = ( column_type, OPTIONAL(foreign_identifier)
-                        , SPACE
-                        , G(identifier, name="column_name"), OPTIONAL(L("?"))
-                        , OPTIONAL(eol_c_comment)
-                        )
+    grammar = (
+        column_type, OPTIONAL(foreign_identifier), SPACE,
+        G(identifier, name="column_name"), OPTIONAL(L("?")),
+        OPTIONAL(eol_c_comment)
+    )
 
     def grammar_elem_init(self, sessiondata):
         self.type = str(self.elements[0])
@@ -139,34 +138,34 @@ class build_version_raw:
         self.build = build
 
     def __str__(self):
-        return "{}.{}".format (self.version(), self.build)
+        return "{}.{}".format(self.version(), self.build)
 
     def version(self):
         return "{}.{}.{}".format(self.major, self.minor, self.patch)
 
     def __lt__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-                 < (rhs.major, rhs.minor, rhs.patch, rhs.build)
+            < (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
     def __le__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-               <= (rhs.major, rhs.minor, rhs.patch, rhs.build)
+            <= (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
     def __eq__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-               == (rhs.major, rhs.minor, rhs.patch, rhs.build)
+            == (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
     def __ne__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-               != (rhs.major, rhs.minor, rhs.patch, rhs.build)
+            != (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
     def __gt__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-               > (rhs.major, rhs.minor, rhs.patch, rhs.build)
+            > (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
     def __ge__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-               >= (rhs.major, rhs.minor, rhs.patch, rhs.build)
+            >= (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
 
 class build_version_range(Grammar):
@@ -181,10 +180,10 @@ class build_version_range(Grammar):
 
 
 class definition_BUILD(Grammar):
-    grammar = (L("BUILD"),
-               SPACE,
-               LIST_OF(build_version_range, sep=comma_list_separator, collapse=True)
-               )
+    grammar = (
+        L("BUILD"), SPACE,
+        LIST_OF(build_version_range, sep=comma_list_separator, collapse=True)
+    )
 
     def grammar_elem_init(self, sessiondata):
         self.builds = [ranges.builds for ranges in self.elements[2:]]
@@ -193,10 +192,10 @@ class definition_BUILD(Grammar):
 
 
 class definition_LAYOUT(Grammar):
-    grammar = (L("LAYOUT"),
-               SPACE,
-               LIST_OF(layout_hash, sep=comma_list_separator, collapse=True)
-               )
+    grammar = (
+        L("LAYOUT"), SPACE,
+        LIST_OF(layout_hash, sep=comma_list_separator, collapse=True)
+    )
 
     def grammar_elem_init(self, sessiondata):
         self.layouts = [str(layout) for layout in self.elements[2:]]
@@ -205,23 +204,28 @@ class definition_LAYOUT(Grammar):
 
 
 class definition_COMMENT(Grammar):
-    grammar = (L("COMMENT"),
-               SPACE,
-               G(REST_OF_LINE, tags=["COMMENT"]))
+    grammar = (
+        L("COMMENT"), SPACE,
+        G(REST_OF_LINE, tags=["COMMENT"])
+    )
 
     grammar_collapse = True
 
 
 class definition_entry(Grammar):
-    grammar = (OPTIONAL(G(L("$"), G(LIST_OF(G(identifier, tags=["ANNOTATION"], sep=comma_list_separator), name="annotation", collapse=True), L("$"), collapse=True))),
-               G(identifier, name="column_name"),
-               OPTIONAL(G(L("<"), G(OPTIONAL(L("u")), integer, name="int_width"), L(">"), collapse=True)),
-               OPTIONAL(G(L("["), G(integer, name="array_size"), L("]"), collapse=True)),
-               OPTIONAL(eol_c_comment)
-              )
+    grammar = (
+        OPTIONAL(G(L("$"), G(
+            LIST_OF(G(identifier, tags=["ANNOTATION"], sep=comma_list_separator), name="annotation", collapse=True), L("$"), collapse=True
+        ))),
+        G(identifier, name="column_name"),
+        OPTIONAL(G(L("<"), G(OPTIONAL(L("u")), integer, name="int_width"), L(">"), collapse=True)),
+        OPTIONAL(G(L("["), G(integer, name="array_size"), L("]"), collapse=True)),
+        OPTIONAL(eol_c_comment)
+    )
 
     def grammar_elem_init(self, sessiondata):
-        self.annotation = [str(e) for e in self.elements[0].find_all("ANNOTATION")] if self.elements[0] else []
+        self.annotation = [str(e) for e in self.elements[0].find_all(
+            "ANNOTATION")] if self.elements[0] else []
         self.column = str(self.elements[1]) if self.elements[1] else None
         self.is_unsigned = False
         self.int_width = None
@@ -243,12 +247,15 @@ class definition_entry(Grammar):
 
 
 class definitions(Grammar):
-    grammar = (ONE_OR_MORE(G(definition_BUILD | definition_LAYOUT | definition_COMMENT, EOL, name="definition_header")),
-               REPEAT(definition_entry, EOL)
-              )
+    grammar = (
+        ONE_OR_MORE(
+            G(definition_BUILD | definition_LAYOUT |
+              definition_COMMENT, EOL, name="definition_header")
+        ),
+        REPEAT(definition_entry, EOL)
+    )
 
     def grammar_elem_init(self, sessiondata):
-
         def flatten(lis, rec_depth=0):
             try:
                 from collections.abc import Iterable
@@ -261,8 +268,8 @@ class definitions(Grammar):
                 else:
                     yield item
 
-        self.builds = list(chain.from_iterable(([builds.builds for builds in self.find_all("BUILD")])))
-        # self.builds = list(flatten([builds.builds for builds in self.find_all("BUILD")]))
+        self.builds = list(chain.from_iterable(
+            ([builds.builds for builds in self.find_all("BUILD")])))
         self.layouts = list(flatten([layouts.layouts for layouts in self.find_all("LAYOUT")]))
         self.comments = [stru(comment) for comment in self.find_all("COMMENT")]
         self.entries = [entry for entry in self.find_all("ENTRY")]
