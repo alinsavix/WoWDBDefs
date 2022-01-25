@@ -30,7 +30,8 @@ def load_one(engine, directory: str, tablename: str):
     with open(os.path.join(directory, file), newline="") as csvfile:
         reader = csv.DictReader(csvfile, dialect='excel')
         for row in reader:
-            prow = {re.sub(array_re, r"__\g<1>", k): v for k, v in row.items()}
+            # prow = {re.sub(array_re, r"__\g<1>", k): v for k, v in row.items()}
+            prow = {k: v for k, v in row.items()}
             rows.append(prow)
 
     metadata_obj = MetaData()

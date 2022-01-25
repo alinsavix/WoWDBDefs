@@ -341,7 +341,7 @@ def coltype_string(dbname: str, tablename: str, column: dbdwrapper.DbdVersionedC
         column_return = [f"  `{column.name}` {defstr}"]
     else:
         column_return = [
-            f"  `{column.name}__{i}` {defstr}" for i in range(0, column.array_size)]
+            f"  `{column.name}[{i}]` {defstr}" for i in range(0, column.array_size)]
 
     #
     # make our list of index strings, with or without arrays
@@ -350,14 +350,14 @@ def coltype_string(dbname: str, tablename: str, column: dbdwrapper.DbdVersionedC
             index_return = [f"  INDEX `{column.name}_idx` (`{column.name}`)"]
         else:
             index_return = [
-                f"  INDEX `{column.name}__{i}_idx` (`{column.name}__{i}`)" for i in range(0, column.array_size)
+                f"  INDEX `{column.name}_{i}_idx` (`{column.name}[{i}]`)" for i in range(0, column.array_size)
             ]
     else:  # string
         if column.array_size is None or column.array_size < 2:
             index_return = [f"  FULLTEXT `{column.name}_idx` (`{column.name}`)"]
         else:
             index_return = [
-                f"  FULLTEXT `{column.name}__{i}_idx` (`{column.name}__{i}`)" for i in range(0, column.array_size)
+                f"  FULLTEXT `{column.name}_{i}_idx` (`{column.name}[{i}]`)" for i in range(0, column.array_size)
             ]
 
     #
@@ -375,7 +375,7 @@ def coltype_string(dbname: str, tablename: str, column: dbdwrapper.DbdVersionedC
             ]
         else:
             fk_return = [
-                f"  ADD CONSTRAINT `{tablename}_{column.name}__{i}` FOREIGN KEY (`{column.name}__{i}`) REFERENCES `{dbname}`.`{fk.table}` (`{fk.column}`)" for i in range(0, column.array_size)
+                f"  ADD CONSTRAINT `{tablename}_{column.name}_{i}` FOREIGN KEY (`{column.name}[{i}]`) REFERENCES `{dbname}`.`{fk.table}` (`{fk.column}`)" for i in range(0, column.array_size)
             ]
 
     return (column_return, index_return, fk_return)
