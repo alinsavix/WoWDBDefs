@@ -11,13 +11,14 @@
 import argparse
 import csv
 import os
-import pickle
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
-import dbdwrapper
+import dbd
 from ppretty import ppretty
 
 # from ppretty import ppretty
@@ -42,11 +43,11 @@ class CTD:
 
 # a ColDataRef is a dict that maps a given table.name to a definition
 # FIXME: Maybe we should have that as a top-level data structure instead?
-FKReferers = Dict[FKColumn, dbdwrapper.DbdVersionedCol]
+FKReferers = Dict[FKColumn, dbd.DbdVersionedCol]
 FKReferents = Dict[FKColumn, FKReferers]
 
-
 AnalysisData = Dict[FKColumn, Dict[str, Any]]
+
 def get_analysis(filename: str) -> AnalysisData:
     data: Dict[FKColumn, Any] = {}
     with open(filename, newline="") as csvfile:
@@ -70,13 +71,13 @@ def analysis_check_unsigned(analysis: AnalysisData, columns: List[FKColumn]) -> 
 
 
 # FIXME: should this be in dbdwrapper?
-def get_fk_cols(args: argparse.Namespace, view: dbdwrapper.DbdVersionedView) -> FKReferents:
+def get_fk_cols(args: argparse.Namespace, view: dbd.DbdVersionedView) -> FKReferents:
     """
     Look through all our tables and find columns that are used as a reference
     for a foreign key, so that we can add an index on them later.
 
-    :param dbds: The data structure from a dbd directory parsed by dbdwrapper
-    :type dbds: dbdwrapper.DbdDirectory
+    :param dbds: The data structure from a dbd directory parsed by the dbd lib
+    :type dbds: dbd.DbdDirectory
     :return: A set containing the names of all FKs, in the format of `table.column`
     :rtype: Set[str]
     """
@@ -103,7 +104,7 @@ def get_fk_cols(args: argparse.Namespace, view: dbdwrapper.DbdVersionedView) -> 
                     # print(f"    data stored is: {coldef}", file=sys.stderr)
                 else:
                     # print(f"nonexist ref {table}.{column} -> {fkt}.{fkc}", file=sys.stderr)
-                    if fkt not in ["FileData", "SoundEntries"] and not args.no_warn_missing_fk:
+                    if fkt not in ["FileData", "SoundEntries"] and args.warn_missing_fk:
                         print(
                             f"WARNING: Foreign key for {table}.{column} references non-existent table or colfumn {fkt}.{fkc}", file=sys.stderr)
 
@@ -122,15 +123,14 @@ negative_one_is_null = set([
 ])
 # negative_one_is_null = set()
 
-def fk_fixup_inner(table_name: str, table_data: dbdwrapper.DbdVersionedCols,
-                   view: dbdwrapper.DbdVersionedView, fkcols: FKReferents, analysis: AnalysisData) -> None:
-    # print(f"THANG: {table_name}")
+def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
+                   view: dbd.DbdVersionedView, fkcols: FKReferents, analysis: AnalysisData,
+                   show_fixups: bool = False) -> None:
+    def optional_print(msg: str):
+        if show_fixups:
+            print(msg, file=sys.stderr)
 
     for column_name, column_data in table_data.items():
-        # only care about making sure the id column matches the referer types
-        # if "id" not in column_data.annotation:
-        #     continue
-
         # If this column is referenced by another table/column's foreign key,
         # generate an index for it (unless this column is already the PK).
         # Indexes get kept until the end so that we can stuff them at the
@@ -141,11 +141,12 @@ def fk_fixup_inner(table_name: str, table_data: dbdwrapper.DbdVersionedCols,
                             column_data.is_unsigned, column_data.int_width)
         referent_col = FKColumn(table_name, column_data.name)
 
-        # if referent_col not in fkcols:
-        #     print(f"THANG: {referent_col} not in fkcols")
 
-        # if this column is referenced by another table/column's foreign key,
+        # if this column is referenced by another table/column's foreign key..
         if referent_col in fkcols:
+            # survey the number of referers that are signed/unsigned, and the
+            # maximum integer width seen, so that we can derive the proper
+            # integer type for the column in us (the referent)
             refs_signed = refs_unsigned = 0
 
             assert column_data.int_width is not None
@@ -155,12 +156,8 @@ def fk_fixup_inner(table_name: str, table_data: dbdwrapper.DbdVersionedCols,
             all_cols: List[str] = []
             for referer_table, referer_coldata in fkcols[referent_col].items():
                 if referer_coldata.is_unsigned:
-                    # print(
-                    #     f"unsigned: {referer_table.table}.{referer_table.column}", file=sys.stderr)
                     refs_unsigned += 1
                 else:
-                    # print(
-                    #     f"signed: {referer_table.table}.{referer_table.column}", file=sys.stderr)
                     refs_signed += 1
 
                 assert referer_coldata.int_width is not None
@@ -179,30 +176,27 @@ def fk_fixup_inner(table_name: str, table_data: dbdwrapper.DbdVersionedCols,
             if len(mismatches) == 0:
                 continue
 
-            # print(f"THING THING: {table_name}.{column_data.name}")
-            # if (table_name, column_data.name) == ("SpellVisualMissile", "ID"):
-            #     print("THING:")
-            #     print(ppretty(view[table_name][column_data.name]))
-
             # deal with mismatches
+            # special case -- known case where the referrer is -1 when it's not
+            # referencing a row for its FK, so we can just set it to NULL
             if referent_col in negative_one_is_null:
-                print(
-                    f"FIXUP: referent {table_name}.{column_name} -> unsigned: True, bits: {refs_maxbits} (special case)", file=sys.stderr)
+                optional_print(
+                    f"FIXUP: referent {table_name}.{column_name} -> unsigned: True, bits: {refs_maxbits} (special case)")
 
                 # Make our id unsigned
-                column_data.is_unsigned = False  # hacked
+                column_data.is_unsigned = False  # FIXME: make actually unsigned!
 
                 # and make our bit width consistent all the way around
                 column_data.int_width = refs_maxbits
                 for referer_table, referer_coldata in fkcols[referent_col].items():
-                    print(f"      {referer_table.table}.{referer_table.column}",
-                          file=sys.stderr)
+                    optional_print(f"      {referer_table.table}.{referer_table.column}")
                     referer_coldata.is_unsigned = False  # FIXME: hax
                     referer_coldata.int_width = refs_maxbits
 
             elif refs_signed > 0 and refs_unsigned == 0:
-                print(
-                    f"FIXUP: referent {table_name}.{column_name} -> signed: False, bits: {refs_maxbits}", file=sys.stderr)
+                # everything is signed
+                optional_print(
+                    f"FIXUP: referent {table_name}.{column_name} -> signed: False, bits: {refs_maxbits}")
 
                 # Make our id signed
                 column_data.is_unsigned = False
@@ -210,13 +204,13 @@ def fk_fixup_inner(table_name: str, table_data: dbdwrapper.DbdVersionedCols,
                 # and make our bit width consistent all the way around
                 column_data.int_width = refs_maxbits
                 for referer_table, referer_coldata in fkcols[referent_col].items():
-                    print(f"      {referer_table.table}.{referer_table.column}",
-                          file=sys.stderr)
+                    optional_print(f"      {referer_table.table}.{referer_table.column}")
                     referer_coldata.int_width = refs_maxbits
 
+            # everything is unsigned
             elif refs_unsigned > 0 and refs_signed == 0:
-                print(
-                    f"FIXUP: referent {table_name}.{column_name} -> unsigned: True, bits: {refs_maxbits}", file=sys.stderr)
+                optional_print(
+                    f"FIXUP: referent {table_name}.{column_name} -> unsigned: True, bits: {refs_maxbits}")
 
                 # Make our id signed
                 column_data.is_unsigned = True
@@ -224,15 +218,14 @@ def fk_fixup_inner(table_name: str, table_data: dbdwrapper.DbdVersionedCols,
                 # and make our bit width consistent all the way around
                 column_data.int_width = refs_maxbits
                 for referer_table, referer_coldata in fkcols[referent_col].items():
-                    print(f"      {referer_table.table}.{referer_table.column}",
-                          file=sys.stderr)
+                    optional_print(f"      {referer_table.table}.{referer_table.column}")
                     referer_coldata.int_width = refs_maxbits
 
             # The tables as listed in the DBDefs aren't consistent... how 'bout
             # in the analysis?
             elif analysis_check_unsigned(analysis, list(fkcols[referent_col].keys())):
-                print(
-                    f"FIXUP: referent {table_name}.{column_name} -> unsigned: False, bits: {refs_maxbits} (from analysis)", file=sys.stderr)
+                optional_print(
+                    f"FIXUP: referent {table_name}.{column_name} -> unsigned: False, bits: {refs_maxbits} (from analysis)")
 
                 # Make our id unsigned
                 column_data.is_unsigned = True
@@ -240,8 +233,7 @@ def fk_fixup_inner(table_name: str, table_data: dbdwrapper.DbdVersionedCols,
                 # and make our bit width consistent all the way around
                 column_data.int_width = refs_maxbits
                 for referer_table, referer_coldata in fkcols[referent_col].items():
-                    print(f"      {referer_table.table}.{referer_table.column}",
-                          file=sys.stderr)
+                    optional_print(f"      {referer_table.table}.{referer_table.column}")
                     referer_coldata.is_unsigned = True
                     referer_coldata.int_width = refs_maxbits
 
@@ -256,16 +248,15 @@ def fk_fixup_inner(table_name: str, table_data: dbdwrapper.DbdVersionedCols,
                     print(col, file=sys.stderr)
 
 
-def fk_fixup(view: dbdwrapper.DbdVersionedView, fkcols: FKReferents, analysis: AnalysisData) -> None:
+def fk_fixup(view: dbd.DbdVersionedView, fkcols: FKReferents, analysis: AnalysisData,
+             show_fixups: bool = False) -> None:
     for table_name, table_data in view.items():
-        fk_fixup_inner(table_name, table_data, view, fkcols, analysis)
+        fk_fixup_inner(table_name, table_data, view, fkcols, analysis, show_fixups)
 
 
 int_sizemap = {
     8: "TINYINT",
     16: "SMALLINT",
-    # 8: "INT",
-    # 16: "INT",
     32: "INT",
     64: "BIGINT",
 }
@@ -275,14 +266,17 @@ int_signmap = {
     True: " UNSIGNED",
 }
 
-def coltype_string(dbname: str, tablename: str, column: dbdwrapper.DbdVersionedCol) -> Tuple[List[str], List[str], List[str]]:
+def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol) -> Tuple[List[str], List[str], List[str]]:
     """
     Generate the type string for a given column, based on DBD data
 
     :param column: A versioned column struct from DBD data
-    :type column: dbdwrapper.DbdVersionedCol
-    :return: A string that can be used in a column of a `CREATE TABLE` statement
-    :rtype: str
+    :type column: dbd.DbdVersionedCol
+    :return: A tuple of lists of strings, with possible column definitions, index
+    definitions, and foreign key definitions for the column in question. These
+    will always be generated, but should only be used by the caller if/when they
+    are appropriate and needed
+    :rtype: Tuple[List[str], List[str], List[str]]
     """
 
     # string to write the column definition into, so that we can array it if we
@@ -295,10 +289,9 @@ def coltype_string(dbname: str, tablename: str, column: dbdwrapper.DbdVersionedC
     if len(column.annotation) > 0:
         annotations = "(annotations: " + ", ".join(sorted(column.annotation)) + ")"
 
-    #
-    # create comments for a the column
-    # Theoretically column def or entry def could have a comment,
-    # but most/all seem to be on the global column def, so ... just use that.
+    # create comments for a the column. Theoretically both the column def and
+    # the build def could have a comment, but most/all seem to be on the
+    # global column def, so ... just use that.
     comments = ""
     if column.definition.comment is not None:
         comments = column.definition.comment.replace("\\", "\\\\")
@@ -309,19 +302,18 @@ def coltype_string(dbname: str, tablename: str, column: dbdwrapper.DbdVersionedC
 
     sql_comment_string = ""
     if annotations or comments:
-        if annotations and comments:  # feels sloppy
+        if annotations and comments:  # this feels sloppy
             sql_comment_string = f" COMMENT '{comments} {annotations}'"
         else:
             sql_comment_string = f" COMMENT '{comments}{annotations}'"
 
-    #
     # create the type string
     if column.definition.type == "int":
         assert column.int_width is not None
-        # FIXME: add a comment w/ the original width
+
+        # FIXME: maybe add a comment w/ the original width
         int_string = int_sizemap.get(column.int_width, "INT")
         if column.is_unsigned:
-            # return f"  `{column.name}` {int_string} UNSIGNED{sql_comment_string}"
             defstr = f"{int_string} UNSIGNED{sql_comment_string}"
         else:
             defstr = f"{int_string}{sql_comment_string}"
@@ -335,7 +327,6 @@ def coltype_string(dbname: str, tablename: str, column: dbdwrapper.DbdVersionedC
     else:
         raise ValueError(f"Unknown column type: {column.definition.type}")
 
-    #
     # make our list of 'create' strings, with or without arrays
     if column.array_size is None or column.array_size < 2:
         column_return = [f"  `{column.name}` {defstr}"]
@@ -343,7 +334,6 @@ def coltype_string(dbname: str, tablename: str, column: dbdwrapper.DbdVersionedC
         column_return = [
             f"  `{column.name}[{i}]` {defstr}" for i in range(0, column.array_size)]
 
-    #
     # make our list of index strings, with or without arrays
     if column.definition.type == "int" or column.definition.type == "float":
         if column.array_size is None or column.array_size < 2:
@@ -360,7 +350,6 @@ def coltype_string(dbname: str, tablename: str, column: dbdwrapper.DbdVersionedC
                 f"  FULLTEXT `{column.name}_{i}_idx` (`{column.name}[{i}]`)" for i in range(0, column.array_size)
             ]
 
-    #
     # make our list of FK strings, with or without arrays, if there's a FK.
     #
     # Unlike the others, we don't generate the constraint string at all (rather
@@ -380,14 +369,9 @@ def coltype_string(dbname: str, tablename: str, column: dbdwrapper.DbdVersionedC
 
     return (column_return, index_return, fk_return)
 
-    # f"  INDEX `{column.name}_idx` (`{column.name}`)"
-    # f"  FULLTEXT `{column.name}_idx` (`{column.name}`)"
-    #   ADD CONSTRAINT `CharShipment_ContainerID` FOREIGN KEY (`ContainerID`) REFERENCES `wowdbd`.`CharShipmentContainer` (`ID`),
 
-
-
-def dumpdbd(dbname: str, tablename: str, all_data: dbdwrapper.DbdVersionedView,
-            table_data: dbdwrapper.DbdVersionedCols, fkcols: FKReferents) -> List[str]:
+def dumpdbd(dbname: str, tablename: str, all_data: dbd.DbdVersionedView,
+            table_data: dbd.DbdVersionedCols, fkcols: FKReferents) -> List[str]:
     """
     Take the parsed data, the build-specific view, and a list of foreign keys,
     and generate a bunch of MySQL `CREATE TABLE` statements. Returns a list of
@@ -400,9 +384,9 @@ def dumpdbd(dbname: str, tablename: str, all_data: dbdwrapper.DbdVersionedView,
     :param table: [description]
     :type table: str
     :param all_data: [description]
-    :type all_data: dbdwrapper.DbdVersionedView
+    :type all_data: dbd.DbdVersionedView
     :param table_data: [description]
-    :type table_data: dbdwrapper.DbdVersionedCols
+    :type table_data: dbd.DbdVersionedCols
     :param fkcols: [description]
     :type fkcols: FKColumnRefs
     :return: [description]
@@ -418,16 +402,20 @@ def dumpdbd(dbname: str, tablename: str, all_data: dbdwrapper.DbdVersionedView,
 
     # cycle through every column in our view and generate SQL
     for _, column in table_data.items():
-        # id column?
+        referent_type = CTD(column.definition.type, column.is_unsigned, column.int_width)
+        referent_col = FKColumn(tablename, column.name)
+        col_create, col_index, col_fk = coltype_strings(dbname, tablename, column)
+
+        # is this column our id column?
         if "id" in column.annotation:
             id_col = column.name
 
-        referent_type = CTD(column.definition.type, column.is_unsigned, column.int_width)
-        referent_col = FKColumn(tablename, column.name)
-        col_create, col_index, col_fk = coltype_string(dbname, tablename, column)
-
-        # We always want to create the column
-        create_lines.extend(col_create)
+            # make the id column first -- id cols can't be arrays, so just
+            # use the first element of the returned list
+            create_lines.insert(0, col_create[0])
+        else:
+            # not id, just append to the list
+            create_lines.extend(col_create)
 
         # If this column is referenced by another table/column's foreign key,
         # generate an index for it (unless this column is already the PK).
@@ -448,6 +436,9 @@ def dumpdbd(dbname: str, tablename: str, all_data: dbdwrapper.DbdVersionedView,
             fk_table = str(column.definition.fk.table)
             fk_col = str(column.definition.fk.column)
 
+            # FileData as a table no longer exists
+            # FIXME: Maybe we should make it exist, to make queries against
+            # it easier?
             if fk_table == "FileData":
                 continue
 
@@ -474,56 +465,31 @@ def dumpdbd(dbname: str, tablename: str, all_data: dbdwrapper.DbdVersionedView,
     # Add in any index creation we had stored for now
     create_lines.extend(index_lines)
 
-    # Generate statements for appropriate foreign keys, which will be returned
-    # from this function to be added at the end after all the tables have been
-    # created.
-    # for _, column in table_data.items():
-    #     if column.definition.fk is not None:
-    #         fk_table = str(column.definition.fk.table)
-    #         fk_col = str(column.definition.fk.column)
-
-    # Don't complain about the FileData table not existing, since
-    # everything just uses FDIDs directly now, but the FK annotation
-    # still exists because it's a part of the defs structure that isn't
-    # versioned
-    # if fk_table == "FileData":
-    #     continue
-
-    # This was an across the board change, just Make It Work™
-    # if fk_table == "SoundEntries":
-    #     fk_table = "SoundKit"
-
-    # If we don't have the referenced table, index this for use as a
-    # possible grouping key, if it's not already indexed
-    # if referent_col not in fkcols and fk_table not in all_data:
-    #     print(f"no referer to {tablename}.{column.name}", file=sys.stderr)
-    #     create_lines.extend(col_index)
-    # index_lines.append(f"  INDEX `{column.name}_group_idx` (`{column.name}`)")
-    #     errout(
-    #         f"WARNING: Foreign key for {table}.{column.name} references non-existent table {fk_table}")
-    # continue
-    # else:
-    #     print(
-    #         f"processed referer to {tablename}.{column.name} --> {col_fk}", file=sys.stderr)
-    #     deferred.extend(col_fk)
-
-    # Make sure the dsestination column of the FK exists in this build
-    # if fk_col not in all_data[fk_table]:
-    #     errout(
-    #         f"WARNING: Foreign key {table}.{column.name} references non-existent column {fk_col}.{c}")
-    #     continue
-
-    # deferred.append(
-    #     f"  ADD CONSTRAINT `{tablename}_{column.name}` FOREIGN KEY (`{column.name}`) REFERENCES `{dbname}`.`{fk_table}` (`{fk_col}`)")
-    # deferred.extend(col_fk)
-
     # Generate the actual `CREATE` statement
     # FIXME: include comment w/ layout hash(s), git source info, and file comments
     print(f"\nCREATE TABLE IF NOT EXISTS `{dbname}`.`{tablename}` (")
     print(",\n".join(create_lines))
-    print(");")
+    print(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;")
 
     return deferred
+
+
+def get_git_revision() -> Tuple[Optional[str], bool]:
+    """Get the current git version and a dirty flag, for metadata"""
+
+    try:
+        revstr = subprocess.check_output(["git", "rev-parse", "--short=10", "HEAD"])
+        rev = revstr.strip().decode("utf-8")
+
+        isdirty = False
+        dirtystr = subprocess.check_output(
+            ["git", "status", "--untracked-files=no", "--porcelain"]).strip()
+        if dirtystr:
+            isdirty = True
+
+        return rev, isdirty
+    except Exception as e:
+        return None, False
 
 
 def build_string_regex(arg_value, pat=re.compile(r"^\d+\.\d+\.\d+\.\d+$")) -> str:
@@ -536,20 +502,32 @@ def build_string_regex(arg_value, pat=re.compile(r"^\d+\.\d+\.\d+\.\d+$")) -> st
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--definitions", dest="definitions", type=str, action='store',
+        "--definitions", "--defs", dest="definitions", type=str, action='store',
         default="../../definitions", help="location of .dbd files")
     parser.add_argument(
-        "--build", dest="build", type=build_string_regex, default="9.1.5.41488",
+        "--analysis", dest="analysis_file", type=str, action='store',
+        default="analysis.csv", help="extra column analysis data")
+    parser.add_argument(
+        "--build", dest="build", type=build_string_regex, default="9.2.0.41257",
         help="full build number to use for parsing")
     parser.add_argument(
         "--dbname", dest="dbname", type=str, default="wowdbd",
         help="name of MySQL database to generate create statements for")
     parser.add_argument(
-        "--no-pickle", dest="no_pickle", action='store_true', default=False,
-        help="don't use or create pickled data file")
+        "--no-cache", dest="no_cache", action='store_true', default=False,
+        help="don't use or create cached data file")
     parser.add_argument(
-        "--no-warn-missing-fk", dest="no_warn_missing_fk", action='store_true', default=False,
-        help="don't warn about missing FK referents")
+        "--refresh-cache", dest="refresh_cache", action='store_true', default=False,
+        help="re-parse data and refresh cached data file")
+    parser.add_argument(
+        "--warn-missing-fk", dest="warn_missing_fk", action='store_true', default=False,
+        help="warn about missing FK referents")
+    parser.add_argument(
+        "--show-fixups", dest="show_fixups", action='store_true', default=False,
+        help="show datatype and signedness fixups made to columns")
+    parser.add_argument(
+        "--no-git", dest="no_git", action='store_true', default=False,
+        help="don't include git revision in metadata")
 
     # --only is disabled for now, since using it will cause FKs to be wrong
     # if it's used to try to generate an updated schema w/o parsing everything
@@ -566,19 +544,51 @@ def main() -> int:
     # else:
     #   dbds = dbd.parse_dbd_directory(args.definitions)
 
-    dbds = dbdwrapper.load_directory_cached(args.definitions)
-    build = dbdwrapper.BuildId.from_string(args.build)
+    dbds = dbd.load_dbd_directory_cached(
+        args.definitions, skip_cache=args.no_cache, refresh_cache=args.refresh_cache)
+    build = dbd.BuildId.from_string(args.build)
     view = dbds.get_view(build)
     fkcols = get_fk_cols(args, view)  # get foreign key columns
-    analysis = get_analysis("analysis.csv")
-    fk_fixup(view, fkcols, analysis)
+    analysis = get_analysis(args.analysis_file)
+    fk_fixup(view, fkcols, analysis, show_fixups=args.show_fixups)
+
+    # check upfront so we can bail before we start generating output
+    rev, isdirty = get_git_revision()
+    if rev is None and not args.no_git:
+        print("ERROR: Couldn't find git revision, run with --no-git to disable", file=sys.stderr)
+        return 1
+
+    metasql = (
+        f"\nCREATE TABLE IF NOT EXISTS `{args.dbname}`.`_dbdmeta` (\n"
+        "  `rev` VARCHAR(10),\n"
+        "  `dirty` TINYINT UNSIGNED,\n"
+        "  `build` VARCHAR(16) NOT NULL,\n"
+        "  `schemadate` DATETIME NOT NULL\n"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\n"
+        "\n"
+    )
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if rev is not None:
+        metasql += (
+            "INSERT INTO `_dbdmeta` (`rev`, `dirty`, `build`, `schemadate`)\n"
+            f"  VALUES ('{rev}', {1 if isdirty else 0}, '{build}', '{now}');\n\n"
+        )
+    else:
+        metasql += (
+            "INSERT INTO `_dbdmeta` (`rev`, `dirty`, `build`, `schemadate`)\n"
+            f"  VALUES (NULL, NULL, '{build}', '{now}');\n\n"
+        )
+
+    # No in-place updates -- just drop and recreate the entire database
+    # FIXME: add some metadata
+    print(f"DROP DATABASE IF EXISTS {args.dbname};")
+    print(f"CREATE DATABASE {args.dbname};")
+    print(metasql)
 
     # deferred statements to add to `ALTER` at the end
     deferred = {}
-
-    # No in-place updates -- just drop and recreate the entire database
-    print(f"DROP DATABASE IF EXISTS {args.dbname};")
-    print(f"CREATE DATABASE {args.dbname};")
 
     for table, data in view.items():
         deferred[table] = dumpdbd(args.dbname, table, view, data, fkcols)
