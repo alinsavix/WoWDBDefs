@@ -469,7 +469,7 @@ def dumpdbd(dbname: str, tablename: str, all_data: dbd.DbdVersionedView,
     # FIXME: include comment w/ layout hash(s), git source info, and file comments
     print(f"\nCREATE TABLE IF NOT EXISTS `{dbname}`.`{tablename}` (")
     print(",\n".join(create_lines))
-    print(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;")
+    print(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;")
 
     return deferred
 
@@ -564,7 +564,7 @@ def main() -> int:
         "  `dirty` TINYINT UNSIGNED,\n"
         "  `build` VARCHAR(16) NOT NULL,\n"
         "  `schemadate` DATETIME NOT NULL\n"
-        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\n"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;\n"
         "\n"
     )
 
@@ -572,7 +572,7 @@ def main() -> int:
 
     if rev is not None:
         metasql += (
-            "INSERT INTO `_dbdmeta` (`rev`, `dirty`, `build`, `schemadate`)\n"
+            f"INSERT INTO `{args.dbname}`.`_dbdmeta` (`rev`, `dirty`, `build`, `schemadate`)\n"
             f"  VALUES ('{rev}', {1 if isdirty else 0}, '{build}', '{now}');\n\n"
         )
     else:
