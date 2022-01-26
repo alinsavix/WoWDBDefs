@@ -1,15 +1,9 @@
 #! /usr/bin/env python
-# requires python 3.7 or newer
 
-import codecs
-import os
+from modgrammar import *
 from itertools import chain
-
-#
-# PART ONE: the actual DBD parser
-#
-from modgrammar import (EOF, EOL, LIST_OF, ONE_OR_MORE, OPTIONAL, REPEAT,
-                        REST_OF_LINE, SPACE, WORD, ZERO_OR_MORE, G, Grammar, L)
+import os
+import codecs
 
 # parses a given dbd (as string) and returns an object with
 #
@@ -38,8 +32,6 @@ from modgrammar import (EOF, EOL, LIST_OF, ONE_OR_MORE, OPTIONAL, REPEAT,
 #         .comment: string
 
 
-file_suffix = ".dbd"
-
 def parse_dbd(content):
     return dbd_parser.parse_string(content)
 
@@ -49,14 +41,17 @@ def parse_dbd_file(path):
         with codecs.open(path, encoding=u'utf-8') as f:
             return parse_dbd(f.read())
     except Exception as ex:
-        raise Exception(u'failed to parse dbd file "{}": {}'.format(path, ex))
+        raise Exception(u'failed to parse dbd file "{}": {}'.format (path, ex))
+
+
+file_suffix = ".dbd"
 
 
 def parse_dbd_directory(path):
     dbds = {}
     for file in os.listdir(path):
         if file.endswith(file_suffix):
-            dbds[file[:-len(file_suffix)]] = parse_dbd_file(os.path.join(path, file))
+            dbds[file[:-len(file_suffix)]] = parse_dbd_file(os.path.join(path,file))
     return dbds
 
 
@@ -92,7 +87,7 @@ class comma_list_separator(Grammar):
 
 
 class foreign_identifier (Grammar):
-    # todo: table is not actually a identifier, but table_name?
+    #! \todo table is not actually a identifier, but table_name?
     grammar = (L("<"), identifier, L("::"), identifier, L(">"))
 
     def grammar_elem_init(self, sessiondata):
@@ -106,11 +101,11 @@ def stru(elem):
     return u'{}'.format(elem)
 
 class column_definition (Grammar):
-    grammar = (
-        column_type, OPTIONAL(foreign_identifier), SPACE,
-        G(identifier, name="column_name"), OPTIONAL(L("?")),
-        OPTIONAL(eol_c_comment)
-    )
+    grammar = ( column_type, OPTIONAL(foreign_identifier)
+                        , SPACE
+                        , G(identifier, name="column_name"), OPTIONAL(L("?"))
+                        , OPTIONAL(eol_c_comment)
+                        )
 
     def grammar_elem_init(self, sessiondata):
         self.type = str(self.elements[0])
@@ -144,34 +139,34 @@ class build_version_raw:
         self.build = build
 
     def __str__(self):
-        return "{}.{}".format(self.version(), self.build)
+        return "{}.{}".format (self.version(), self.build)
 
     def version(self):
         return "{}.{}.{}".format(self.major, self.minor, self.patch)
 
     def __lt__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-            < (rhs.major, rhs.minor, rhs.patch, rhs.build)
+                 < (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
     def __le__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-            <= (rhs.major, rhs.minor, rhs.patch, rhs.build)
+               <= (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
     def __eq__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-            == (rhs.major, rhs.minor, rhs.patch, rhs.build)
+               == (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
     def __ne__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-            != (rhs.major, rhs.minor, rhs.patch, rhs.build)
+               != (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
     def __gt__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-            > (rhs.major, rhs.minor, rhs.patch, rhs.build)
+               > (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
     def __ge__(self, rhs):
         return (self.major, self.minor, self.patch, self.build) \
-            >= (rhs.major, rhs.minor, rhs.patch, rhs.build)
+               >= (rhs.major, rhs.minor, rhs.patch, rhs.build)
 
 
 class build_version_range(Grammar):
@@ -186,10 +181,10 @@ class build_version_range(Grammar):
 
 
 class definition_BUILD(Grammar):
-    grammar = (
-        L("BUILD"), SPACE,
-        LIST_OF(build_version_range, sep=comma_list_separator, collapse=True)
-    )
+    grammar = (L("BUILD"),
+               SPACE,
+               LIST_OF(build_version_range, sep=comma_list_separator, collapse=True)
+               )
 
     def grammar_elem_init(self, sessiondata):
         self.builds = [ranges.builds for ranges in self.elements[2:]]
@@ -198,10 +193,10 @@ class definition_BUILD(Grammar):
 
 
 class definition_LAYOUT(Grammar):
-    grammar = (
-        L("LAYOUT"), SPACE,
-        LIST_OF(layout_hash, sep=comma_list_separator, collapse=True)
-    )
+    grammar = (L("LAYOUT"),
+               SPACE,
+               LIST_OF(layout_hash, sep=comma_list_separator, collapse=True)
+               )
 
     def grammar_elem_init(self, sessiondata):
         self.layouts = [str(layout) for layout in self.elements[2:]]
@@ -210,28 +205,23 @@ class definition_LAYOUT(Grammar):
 
 
 class definition_COMMENT(Grammar):
-    grammar = (
-        L("COMMENT"), SPACE,
-        G(REST_OF_LINE, tags=["COMMENT"])
-    )
+    grammar = (L("COMMENT"),
+               SPACE,
+               G(REST_OF_LINE, tags=["COMMENT"]))
 
     grammar_collapse = True
 
 
 class definition_entry(Grammar):
-    grammar = (
-        OPTIONAL(G(L("$"), G(
-            LIST_OF(G(identifier, tags=["ANNOTATION"], sep=comma_list_separator), name="annotation", collapse=True), L("$"), collapse=True
-        ))),
-        G(identifier, name="column_name"),
-        OPTIONAL(G(L("<"), G(OPTIONAL(L("u")), integer, name="int_width"), L(">"), collapse=True)),
-        OPTIONAL(G(L("["), G(integer, name="array_size"), L("]"), collapse=True)),
-        OPTIONAL(eol_c_comment)
-    )
+    grammar = (OPTIONAL(G(L("$"), G(LIST_OF(G(identifier, tags=["ANNOTATION"], sep=comma_list_separator), name="annotation", collapse=True), L("$"), collapse=True))),
+               G(identifier, name="column_name"),
+               OPTIONAL(G(L("<"), G(OPTIONAL(L("u")), integer, name="int_width"), L(">"), collapse=True)),
+               OPTIONAL(G(L("["), G(integer, name="array_size"), L("]"), collapse=True)),
+               OPTIONAL(eol_c_comment)
+              )
 
     def grammar_elem_init(self, sessiondata):
-        self.annotation = [str(e) for e in self.elements[0].find_all(
-            "ANNOTATION")] if self.elements[0] else []
+        self.annotation = [str(e) for e in self.elements[0].find_all("ANNOTATION")] if self.elements[0] else []
         self.column = str(self.elements[1]) if self.elements[1] else None
         self.is_unsigned = False
         self.int_width = None
@@ -253,15 +243,12 @@ class definition_entry(Grammar):
 
 
 class definitions(Grammar):
-    grammar = (
-        ONE_OR_MORE(
-            G(definition_BUILD | definition_LAYOUT |
-              definition_COMMENT, EOL, name="definition_header")
-        ),
-        REPEAT(definition_entry, EOL)
-    )
+    grammar = (ONE_OR_MORE(G(definition_BUILD | definition_LAYOUT | definition_COMMENT, EOL, name="definition_header")),
+               REPEAT(definition_entry, EOL)
+              )
 
     def grammar_elem_init(self, sessiondata):
+
         def flatten(lis, rec_depth=0):
             try:
                 from collections.abc import Iterable
@@ -274,8 +261,8 @@ class definitions(Grammar):
                 else:
                     yield item
 
-        self.builds = list(chain.from_iterable(
-            ([builds.builds for builds in self.find_all("BUILD")])))
+        self.builds = list(chain.from_iterable(([builds.builds for builds in self.find_all("BUILD")])))
+        # self.builds = list(flatten([builds.builds for builds in self.find_all("BUILD")]))
         self.layouts = list(flatten([layouts.layouts for layouts in self.find_all("LAYOUT")]))
         self.comments = [stru(comment) for comment in self.find_all("COMMENT")]
         self.entries = [entry for entry in self.find_all("ENTRY")]
@@ -294,467 +281,3 @@ class dbd_file(Grammar):
 
 
 dbd_parser = dbd_file.parser()
-
-
-#
-# PART TWO: The more user-friendly wrapper
-#
-import dataclasses
-import pickle
-import re
-import sys
-from collections import UserDict, UserList
-from dataclasses import dataclass
-from typing import (Any, Dict, List, Literal, Optional, Set, Tuple, Type,
-                    TypeVar, Union)
-
-from ppretty import ppretty
-
-BuildIdOrTuple = Union['BuildId', Tuple[int, int, int, int]]
-DbdBuildOrRange = Union[build_version, Tuple[build_version, build_version]]
-DbdVersionedView = Dict[str, 'DbdVersionedCols']
-
-
-# a stupid function to make it easier to replace FKs that point at SoundEntries
-# with FKs that point at SoundKit instead, since that table was renamed at some
-# point and the DBD format doesn't allow for versioning of that information.
-def table_fk_namecheck(table: str) -> str:
-    if table == "SoundEntries":
-        return "SoundKit"
-
-    # else
-    return table
-
-
-# Data structures for DBD data
-# Most are direct analogues to the data structures returned by the dbd parser,
-# but with less of the cruft that comes from that, and a bit of restructuring
-# of the information to make it easier to work with. Most of these have a
-# from_dbd() method that directly converts data from the matching parser
-# structure.
-@dataclass(init=True, repr=True)
-class DbdForeignKey:
-    table: str
-    column: str
-
-
-@dataclass(init=True, repr=True, eq=True, frozen=True)
-class BuildId:
-    """
-    A data class that encapsulates a WoW build number, in
-    <major>.<minor>.<patch>.<build> format. Maps to the values used
-    by dbd.definitions.builds[build_version]
-
-    :raises ValueError: The build string supplied
-    """
-    major: int
-    minor: int
-    patch: int
-    build: int
-
-    @classmethod
-    def from_dbd(cls, src: build_version) -> 'BuildId':
-        return cls(
-            major=src.major,
-            minor=src.minor,
-            patch=src.patch,
-            build=src.build
-        )
-
-    @classmethod
-    def from_tuple(cls, src: Tuple[int, int, int, int]) -> 'BuildId':
-        return cls(*src)
-
-    @classmethod
-    def from_string(cls, src: str) -> 'BuildId':
-        if not re.match(r'^\d+\.\d+\.\d+\.\d+$', src):
-            raise ValueError(f"Invalid build id string: {src}")
-
-        major, minor, patch, build = src.split('.')
-        return cls(
-            major=int(major),
-            minor=int(minor),
-            patch=int(patch),
-            build=int(build)
-        )
-
-    #
-    # dunder methods to allow for comparing BuildIds
-    #
-    @staticmethod
-    def build_compare(buildid1: 'BuildId', buildid2: 'BuildId') -> int:
-        if buildid1.major != buildid2.major:
-            return buildid1.major - buildid2.major
-        if buildid1.minor != buildid2.minor:
-            return buildid1.minor - buildid2.minor
-        if buildid1.patch != buildid2.patch:
-            return buildid1.patch - buildid2.patch
-        return buildid1.build - buildid2.build
-
-    def __lt__(self, other: BuildIdOrTuple) -> bool:
-        if not isinstance(other, BuildId):
-            other = BuildId(*other)
-
-        return BuildId.build_compare(self, other) < 0
-
-    def __gt__(self, other: BuildIdOrTuple) -> bool:
-        if not isinstance(other, BuildId):
-            other = BuildId(*other)
-
-        return BuildId.build_compare(self, other) > 0
-
-    def __le__(self, other: BuildIdOrTuple) -> bool:
-        if not isinstance(other, BuildId):
-            other = BuildId(*other)
-
-        return BuildId.build_compare(self, other) <= 0
-
-    def __ge__(self, other: BuildIdOrTuple) -> bool:
-        if not isinstance(other, BuildId):
-            other = BuildId(*other)
-
-        return BuildId.build_compare(self, other) >= 0
-
-    def __str__(self) -> str:
-        return f"{self.major}.{self.minor}.{self.patch}.{self.build}"
-
-
-@dataclass(init=True, repr=True, frozen=True)
-class BuildIdRange:
-    """
-    A data class that encapsulates a range of WoW build numbers. Includes a
-    __contains__ method to allow for "if builid in buildrange" type logic.
-    """
-    min: BuildId
-    max: BuildId
-
-    def __contains__(self, item: BuildId) -> bool:
-        return self.min <= item <= self.max
-
-    def __str__(self) -> str:
-        return f"{self.min}-{self.max}"
-
-    @classmethod
-    def from_dbd(cls, build: DbdBuildOrRange) -> 'BuildIdRange':
-        if isinstance(build, build_version):
-            bb = BuildId.from_dbd(build)
-            r = cls(bb, bb)
-        elif isinstance(build, tuple):
-            bb = BuildId.from_dbd(build[0])
-            bbb = BuildId.from_dbd(build[1])
-            r = cls(bb, bbb)
-
-        return r
-
-
-# a build id dict that you can retrieve from via specific build number.
-# works similarly to https://stackoverflow.com/a/39358140/9404062
-# FIXME: consider using 'bisect' for faster lookups (see previous link)
-class DbdBuilds(UserDict['BuildIdRange', 'DbdVersionedCols']):
-    """
-    A dict of build-specific DBD data, indexed by BuildId/BuildIdRange
-    values. Do a lookup using a BuildId to find a build range into which
-    that BuildId fits; do a lookup using a BuildIdRange to find an exact
-    match to that range, if there is one.
-    """
-    def __contains__(self, key: object) -> bool:
-        # if it's a range, behave like a normal dict, and find only an
-        # exact match to the range.
-        if isinstance(key, BuildIdRange):
-            if key in self.data:
-                return True
-            else:
-                return False
-
-        # if a specific version (or a string that might be one), check
-        # to see if there's a match.
-        if isinstance(key, str) or isinstance(key, BuildId):
-            try:
-                self.__getitem__(key)
-                return True
-            except KeyError:
-                return False
-
-        # else
-        return False
-
-    def __getitem__(self, key: object) -> 'DbdVersionedCols':
-        # FIXME: wrong
-        if isinstance(key, str):
-            key = BuildId.from_dbd(build_version(key))
-
-        # search through the dict, find a range that contains the specific
-        # build requested.
-        if isinstance(key, BuildId):
-            for k, v in self.data.items():
-                if key in k:
-                    return v
-
-        raise KeyError(key)
-
-    @classmethod
-    def from_dbd(cls, src: List[definitions], definitions: 'DbdColumnDefs') -> 'DbdBuilds':
-        dbd_builds = cls()
-
-        for dbd_def in src:
-            # get our versioned column list once per def
-            c = DbdVersionedCols.from_dbd(dbd_def.entries, definitions)
-
-            # Now add all the builds, pointing at this specific def
-            for build in dbd_def.builds:
-                b = BuildIdRange.from_dbd(build)
-                dbd_builds[b] = c
-
-        # print(f"returning: {dbd_builds}")
-        return dbd_builds
-
-
-@dataclass(init=True, repr=True)
-class DbdColumnDef:
-    """
-    Data class for the "global" definition of a single data column, matching
-    with the top level .columns structure in the dbd parser output. Information
-    found here is global to all builds.
-
-    """
-    name: str
-    type: Literal["string", "locstring", "int", "float"]
-    is_confirmed_name: bool
-    comment: Optional[str] = None
-    fk: Optional['DbdForeignKey'] = None
-
-    @classmethod
-    def from_dbd(cls, src: column_definition):
-        return cls(
-            name=src.name,
-            type=src.type,
-            is_confirmed_name=src.is_confirmed_name,
-            comment=src.comment,
-            fk=None if not src.foreign else DbdForeignKey(
-                table=table_fk_namecheck(str(src.foreign.table)),
-                column=str(src.foreign.column)
-            )
-        )
-
-
-class DbdColumnDefs(UserDict[str, DbdColumnDef]):
-    """
-    Data class holding an entire set of global column definitions (i.e. a
-    table), indexed by column name.
-    """
-    @classmethod
-    def from_dbd(cls, src: List[column_definition]) -> 'DbdColumnDefs':
-        defs = cls()
-        for d in src:
-            defs[d.name] = DbdColumnDef.from_dbd(d)
-
-        return defs
-
-
-@dataclass(init=True, repr=True)
-class DbdVersionedCol:
-    """
-    Data class for a single column definition for a specific build. This is
-    where most of the "meat" of the data is.
-    """
-    name: str
-    definition: 'DbdColumnDef'  # FIXME: Just roll this data in?
-    annotation: Set[str] = dataclasses.field(default_factory=set)
-    array_size: Optional[int] = None
-    comment: Optional[str] = None
-    int_width: Optional[int] = None
-    is_unsigned: bool = True
-
-    @classmethod
-    def from_dbd(cls, src: definition_entry, definition: 'DbdColumnDef') -> 'DbdVersionedCol':
-        return cls(
-            name=src.column,
-            definition=definition,
-            annotation=set(src.annotation),
-            array_size=src.array_size,
-            comment=src.comment,
-            int_width=src.int_width,
-            is_unsigned=src.is_unsigned
-        )
-
-
-class DbdVersionedCols(UserDict[str, DbdVersionedCol]):
-    """
-    Data class holding an entire set of versioned (build-specific) column
-    definitions (i.e. a table), indexed by column name.
-    """
-    @classmethod
-    def from_dbd(cls, src: List[definition_entry], definitions: DbdColumnDefs) -> 'DbdVersionedCols':
-        cols = cls()
-        for d in src:
-            cols[d.column] = DbdVersionedCol.from_dbd(d, definitions[d.column])
-
-        return cols
-
-
-@dataclass(init=True, repr=True)
-class DbdFileData:
-    """
-    Data class holding all of the parsed data from a single dbd file, for all
-    build versions, plus the global definitions. This maps fairly directly
-    to the top level data structure created by the dbd parser itself.
-    """
-    columns: 'DbdColumnDefs'
-    definitions: 'DbdBuilds'
-
-    @classmethod
-    def from_dbd(cls, src: dbd_file):
-        definitions = DbdColumnDefs.from_dbd(src.columns)
-        return cls(
-            columns=definitions,
-            definitions=DbdBuilds.from_dbd(src.definitions, definitions)
-        )
-
-
-class DbdDirectory(UserDict[str, DbdFileData]):
-    """
-    Data class holding the parsed data for an entire directory full of dbd
-    files (most commonly "all the dbd files") for all builds, indexed by
-    table name.
-    """
-    def get_view(self, build: BuildIdOrTuple) -> DbdVersionedView:
-        """
-        Get a single view of the data for a specific BuildId. Tables and
-        columns that do not exist in the requested build are not included.
-        This is the data structure most software will work with directly,
-        since most software only cares about a single build at once, and
-        this is the simplest way to get at build-specific data without a lot
-        of fluff.
-
-        :param build: A BuildId structure or a tuple of (major, minor, patch, build)
-        :type build: BuildIdOrTuple
-        :return: A 'view' of the DBD data for the requested build.
-        :rtype: DbdVersionedView
-        """
-        view: 'DbdVersionedView' = {}
-        if isinstance(build, tuple):
-            build = BuildId.from_tuple(build)
-
-        for table, tabledef in self.data.items():
-            builds = tabledef.definitions
-            if build in builds:
-                view[table] = builds[build]
-
-        return view
-
-
-def load_dbd_file(filename: str) -> 'DbdFileData':
-    """
-    Parse a single DBD file using the DBD parser, and return the resulting
-    data in a useful form.
-
-    :param filename: filename of the DBD file to parse
-    :type filename: str
-    :return: The parsed data for a single dbd file
-    :rtype: DbdFileData
-    """
-    dbf = parse_dbd_file(filename)
-    return DbdFileData.from_dbd(dbf)
-
-
-def load_dbd_directory(path: str) -> DbdDirectory:
-    """
-    Parse an entire directory of DBD files using the DBD parser, and return
-    the resulting data in a useful form.
-
-    :param path: The directory from which to parse all DBD files
-    :type path: str
-    :return: The parsed data for a directory of DBD files
-    :rtype: DbdDirectory
-    """
-    dbds = DbdDirectory()
-
-    for file in os.listdir(path):
-        if file.endswith(".dbd"):
-            dbds[file[:-len(".dbd")]] = load_dbd_file(os.path.join(path, file))
-
-    return dbds
-
-
-def load_dbd_directory_cached(path: str, skip_cache: bool = False,
-                              refresh_cache: bool = False, silent: bool = False) -> 'DbdDirectory':
-    """
-    Load a directory of DBD files, and cache the result in a file. The cache file
-    is placed in the DBD directory under the name ".dbd.pickle". If the cache is
-    already present, and if skip_cache is False, the cache file is loaded and
-    returned instead of re-parsing all the dbd files (for about a 50x speedup).
-    The cache will *not* be automatically refreshed if stale; to force a refresh,
-    use the refresh_cache parameter. A fresh cache will not be created if
-    skip_cache is true.
-
-    :param path: The directory from which DBD files will be parsed/loaded
-    :type path: str
-    :param skip_cache: don't load or write the on-disk cache, and re-parse all
-    files instead, defaults to False
-    :type skip_cache: bool, optional
-    :param refresh_cache: force a refresh of the on-disk cache, re-parsing all
-    files and caching the results, defaults to False
-    :type refresh_cache: bool, optional
-    :param silent: don't output status messages about loading/parsing/caching,
-    defaults to False
-    :type silent: bool, optional
-    :return: The parsed data for a directory of DBD files
-    :rtype: DbdDirectory
-    """
-    def optional_print(msg: str):
-        if not silent:
-            print(msg, file=sys.stderr)
-
-    dbds = None
-    pickle_path = os.path.join(path, ".dbd.pickle")
-
-    if os.path.exists(pickle_path) and not skip_cache:
-        if refresh_cache:
-            optional_print("NOTICE: Refreshing DBD file cache, not using existing cache")
-        else:
-            optional_print("NOTICE: Reading pickled dbd data from disk")
-
-            with open(pickle_path, "rb") as f:
-                try:
-                    dbds = pickle.load(f)
-                except Exception as e:
-                    optional_print("WARNING: failed to read pickled data from disk")
-
-    if dbds is None:
-        optional_print("NOTICE: No (valid) cache available, directly parsing dbd data")
-
-        dbds = load_dbd_directory(path)
-        if not skip_cache:
-            with open(pickle_path, "wb") as f:
-                pickle.dump(dbds, f)
-
-    return dbds
-
-
-if __name__ == "__main__":
-    # print(b == b)
-    # print(b == (1, 2, 3, 4))
-    # print(b < (1, 2, 3, 4))
-    # print(b <= (1, 2, 3, 4))
-    # print(b < (1, 2, 3, 5))
-    # print(b > (1, 2, 3, 5))
-    # print(b > (1, 2, 3, 4))
-    # print(b >= (1, 2, 3, 4))
-    # print(b > (1, 2, 3, 3))
-
-    # c = BuildId(1, 2, 3, 5)
-    # print(b == c)
-    # print(b < c)
-
-    # print(b == "bob")
-
-    # dbf = dbd.parse_dbd_file("../../defs.mini/Spell.dbd")
-    # f = DbdFileData.from_dbd(dbf)
-    # f = parse_dbd_file("../../defs.mini/Spell.dbd")
-    d = parse_dbd_directory("../../defs.mini")
-    b = BuildId(3, 1, 2, 9768)
-
-    v = d.get_view(b)
-    print(ppretty(v))
-
-    sys.exit(0)

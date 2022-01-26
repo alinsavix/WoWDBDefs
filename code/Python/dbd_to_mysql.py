@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
-import dbd
+import dbdwrapper as dbd
 from ppretty import ppretty
 
 # from ppretty import ppretty

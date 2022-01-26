@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # simplify the results of parsing a dbd w/ the dbd parser library
 import dataclasses
+import pickle
 import os
 import re
 import sys
 from collections import UserDict, UserList
 from dataclasses import dataclass
-from typing import (Any, Dict, List, Literal, Optional, Set, Tuple, Type,
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
                     TypeVar, Union)
-import pickle
-
 import dbd
 from ppretty import ppretty
 
@@ -150,16 +149,23 @@ class BuildIdRange:
         return r
 
 
-# a build id dict that you can retrieve from via specific build number.
-# works similarly to https://stackoverflow.com/a/39358140/9404062
-# FIXME: consider using 'bisect' for faster lookups (see previous link)
-class DbdBuilds(UserDict['BuildIdRange', 'DbdVersionedCols']):
+# The TYPE_CHECKING ugliness (here and elsewhere) allow type hinting for these
+# UserDict entries (when using newer versions of python), while still allowing
+# the code to execute at all on older versions of python. Subscriptable UserDict
+# requires python 3.9 or newer.
+if TYPE_CHECKING:
+    UserDict_DbdBuilds = UserDict['BuildIdRange', 'DbdVersionedCols']
+else:
+    UserDict_DbdBuilds = UserDict
+
+class DbdBuilds(UserDict_DbdBuilds):
     """
     A dict of build-specific DBD data, indexed by BuildId/BuildIdRange
     values. Do a lookup using a BuildId to find a build range into which
     that BuildId fits; do a lookup using a BuildIdRange to find an exact
     match to that range, if there is one.
     """
+    # FIXME: consider using 'bisect' for faster lookups (see previous link)
     def __contains__(self, key: object) -> bool:
         # if it's a range, behave like a normal dict, and find only an
         # exact match to the range.
@@ -221,7 +227,7 @@ class DbdColumnDef:
 
     """
     name: str
-    type: Literal["string", "locstring", "int", "float"]
+    type: str  # Literal["string", "locstring", "int", "float"]
     is_confirmed_name: bool
     comment: Optional[str] = None
     fk: Optional['DbdForeignKey'] = None
@@ -240,7 +246,12 @@ class DbdColumnDef:
         )
 
 
-class DbdColumnDefs(UserDict[str, DbdColumnDef]):
+if TYPE_CHECKING:
+    UserDict_DbdColumnDefs = UserDict[str, DbdColumnDef]
+else:
+    UserDict_DbdColumnDefs = UserDict
+
+class DbdColumnDefs(UserDict_DbdColumnDefs):
     """
     Data class holding an entire set of global column definitions (i.e. a
     table), indexed by column name.
@@ -281,7 +292,12 @@ class DbdVersionedCol:
         )
 
 
-class DbdVersionedCols(UserDict[str, DbdVersionedCol]):
+if TYPE_CHECKING:
+    UserDict_DbdVersionedCols = UserDict[str, DbdVersionedCol]
+else:
+    UserDict_DbdVersionedCols = UserDict
+
+class DbdVersionedCols(UserDict_DbdVersionedCols):
     """
     Data class holding an entire set of versioned (build-specific) column
     definitions (i.e. a table), indexed by column name.
@@ -314,7 +330,12 @@ class DbdFileData:
         )
 
 
-class DbdDirectory(UserDict[str, DbdFileData]):
+if TYPE_CHECKING:
+    UserDict_DbdDirectory = UserDict[str, DbdFileData]
+else:
+    UserDict_DbdDirectory = UserDict
+
+class DbdDirectory(UserDict_DbdDirectory):
     """
     Data class holding the parsed data for an entire directory full of dbd
     files (most commonly "all the dbd files") for all builds, indexed by
@@ -346,7 +367,7 @@ class DbdDirectory(UserDict[str, DbdFileData]):
         return view
 
 
-def parse_dbd_file(filename: str) -> 'DbdFileData':
+def load_dbd_file(filename: str) -> 'DbdFileData':
     """
     Parse a single DBD file using the DBD parser, and return the resulting
     data in a useful form.
@@ -360,7 +381,7 @@ def parse_dbd_file(filename: str) -> 'DbdFileData':
     return DbdFileData.from_dbd(dbf)
 
 
-def parse_dbd_directory(path: str) -> DbdDirectory:
+def load_dbd_directory(path: str) -> DbdDirectory:
     """
     Parse an entire directory of DBD files using the DBD parser, and return
     the resulting data in a useful form.
@@ -374,13 +395,13 @@ def parse_dbd_directory(path: str) -> DbdDirectory:
 
     for file in os.listdir(path):
         if file.endswith(".dbd"):
-            dbds[file[:-len(".dbd")]] = parse_dbd_file(os.path.join(path, file))
+            dbds[file[:-len(".dbd")]] = load_dbd_file(os.path.join(path, file))
 
     return dbds
 
 
-def load_directory_cached(path: str, skip_cache: bool = False,
-                          refresh_cache: bool = False, silent: bool = False) -> 'DbdDirectory':
+def load_dbd_directory_cached(path: str, skip_cache: bool = False,
+                              refresh_cache: bool = False, silent: bool = False) -> 'DbdDirectory':
     """
     Load a directory of DBD files, and cache the result in a file. The cache file
     is placed in the DBD directory under the name ".dbd.pickle". If the cache is
@@ -392,11 +413,14 @@ def load_directory_cached(path: str, skip_cache: bool = False,
 
     :param path: The directory from which DBD files will be parsed/loaded
     :type path: str
-    :param skip_cache: don't load or write the on-disk cache, and re-parse all files instead, defaults to False
+    :param skip_cache: don't load or write the on-disk cache, and re-parse all
+    files instead, defaults to False
     :type skip_cache: bool, optional
-    :param refresh_cache: force a refresh of the on-disk cache, re-parsing all files and caching the results, defaults to False
+    :param refresh_cache: force a refresh of the on-disk cache, re-parsing all
+    files and caching the results, defaults to False
     :type refresh_cache: bool, optional
-    :param silent: don't output status messages about loading/parsing/caching, defaults to False
+    :param silent: don't output status messages about loading/parsing/caching,
+    defaults to False
     :type silent: bool, optional
     :return: The parsed data for a directory of DBD files
     :rtype: DbdDirectory
@@ -423,7 +447,7 @@ def load_directory_cached(path: str, skip_cache: bool = False,
     if dbds is None:
         optional_print("NOTICE: No (valid) cache available, directly parsing dbd data")
 
-        dbds = parse_dbd_directory(path)
+        dbds = load_dbd_directory(path)
         if not skip_cache:
             with open(pickle_path, "wb") as f:
                 pickle.dump(dbds, f)
@@ -451,7 +475,7 @@ if __name__ == "__main__":
     # dbf = dbd.parse_dbd_file("../../defs.mini/Spell.dbd")
     # f = DbdFileData.from_dbd(dbf)
     # f = parse_dbd_file("../../defs.mini/Spell.dbd")
-    d = parse_dbd_directory("../../defs.mini")
+    d = dbd.parse_dbd_directory("../../defs.mini")
     b = BuildId(3, 1, 2, 9768)
 
     v = d.get_view(b)
