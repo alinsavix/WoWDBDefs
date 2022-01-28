@@ -19,6 +19,8 @@ from datetime import datetime
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
 import dbdwrapper as dbd
+from dbdwrapper import DbdColumnId
+from dbdanalyze import DbdColumnAnalysis, load_analysis, AnalysisData
 from ppretty import ppretty
 
 # from ppretty import ppretty
@@ -26,11 +28,6 @@ from ppretty import ppretty
 
 def errout(msg: str) -> None:
     print(msg, file=sys.stderr)
-
-@dataclass(init=True, repr=True, eq=True, frozen=True)
-class FKColumn:
-    table: str
-    column: str
 
 
 # column type def (maybe temporary)
@@ -43,83 +40,26 @@ class CTD:
 
 # a ColDataRef is a dict that maps a given table.name to a definition
 # FIXME: Maybe we should have that as a top-level data structure instead?
-FKReferers = Dict[FKColumn, dbd.DbdVersionedCol]
-FKReferents = Dict[FKColumn, FKReferers]
-
-AnalysisData = Dict[FKColumn, Dict[str, Any]]
-
-def get_analysis(filename: str) -> AnalysisData:
-    data: Dict[FKColumn, Any] = {}
-    with open(filename, newline="") as csvfile:
-        reader = csv.DictReader(csvfile, dialect='excel')
-        for row in reader:
-            if "table" in row and len(row["table"]) > 0:
-                colid = FKColumn(row["table"], row["column"])
-                data[colid] = row
-    return data
+FKReferers = Dict[DbdColumnId, dbd.DbdVersionedCol]
+FKReferents = Dict[DbdColumnId, FKReferers]
 
 
-def analysis_check_unsigned(analysis: AnalysisData, columns: List[FKColumn]) -> bool:
+def analysis_check_unsigned(analysis: AnalysisData, columns: List[DbdColumnId]) -> bool:
     for col in columns:
         if col not in analysis:
             continue
-        if "num_neg" not in analysis[col]:
-            continue
-        if analysis[col]["num_neg"] != "0":
+        if analysis[col].num_negative != 0:
             return False
     return True
 
 
-# FIXME: should this be in dbdwrapper?
-def get_fk_cols(args: argparse.Namespace, view: dbd.DbdVersionedView) -> FKReferents:
-    """
-    Look through all our tables and find columns that are used as a reference
-    for a foreign key, so that we can add an index on them later.
-
-    :param dbds: The data structure from a dbd directory parsed by the dbd lib
-    :type dbds: dbd.DbdDirectory
-    :return: A set containing the names of all FKs, in the format of `table.column`
-    :rtype: Set[str]
-    """
-    from collections import defaultdict
-    fkreferents: DefaultDict[FKColumn, FKReferers] = defaultdict(dict)
-
-    for table, data in view.items():
-        for column, coldata in data.items():
-            if coldata.definition.fk:
-                fkt = coldata.definition.fk.table
-                fkc = coldata.definition.fk.column
-
-                # at this point we have referrent: fkt,fkc  and referer: table,column
-                referer_key = FKColumn(table, column)
-                referent_key = FKColumn(fkt, fkc)
-
-                # Only store the info if the thing we're referencing exists
-                if fkt in view and fkc in view[fkt]:
-                    # print(f"ref {table}.{column} -> {fkt}.{fkc}", file=sys.stderr)
-                    coldef = view[table][column]
-                    fkreferents[referent_key][referer_key] = coldef
-                    # print(
-                    #     f"    stored to fkreferents[{referent_key}][{referer_key}]", file=sys.stderr)
-                    # print(f"    data stored is: {coldef}", file=sys.stderr)
-                else:
-                    # print(f"nonexist ref {table}.{column} -> {fkt}.{fkc}", file=sys.stderr)
-                    if fkt not in ["FileData", "SoundEntries"] and args.warn_missing_fk:
-                        print(
-                            f"WARNING: Foreign key for {table}.{column} references non-existent table or colfumn {fkt}.{fkc}", file=sys.stderr)
-
-    # from ppretty import ppretty
-    # print(f"refs thing: {ppretty(fkreferents)}")
-    return fkreferents
-
-
 negative_one_is_null = set([
-    FKColumn("Faction", "ID"),
-    FKColumn("AnimKitBoneSet", "ID"),
-    FKColumn("AreaTable", "ID"),
-    FKColumn("CreatureType", "ID"),
-    FKColumn("Map", "ID"),
-    FKColumn("AnimationData", "ID"),
+    DbdColumnId("Faction", "ID"),
+    DbdColumnId("AnimKitBoneSet", "ID"),
+    DbdColumnId("AreaTable", "ID"),
+    DbdColumnId("CreatureType", "ID"),
+    DbdColumnId("Map", "ID"),
+    DbdColumnId("AnimationData", "ID"),
 ])
 # negative_one_is_null = set()
 
@@ -139,7 +79,7 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
         # my type and id
         referent_type = CTD(column_data.definition.type,
                             column_data.is_unsigned, column_data.int_width)
-        referent_col = FKColumn(table_name, column_data.name)
+        referent_col = DbdColumnId(table_name, column_data.name)
 
 
         # if this column is referenced by another table/column's foreign key..
@@ -266,7 +206,8 @@ int_signmap = {
     True: " UNSIGNED",
 }
 
-def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol) -> Tuple[List[str], List[str], List[str]]:
+def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol,
+                    analysis: Optional[DbdColumnAnalysis]) -> Tuple[List[str], List[str], List[str]]:
     """
     Generate the type string for a given column, based on DBD data
 
@@ -307,6 +248,14 @@ def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol) ->
         else:
             sql_comment_string = f" COMMENT '{comments}{annotations}'"
 
+    # FIXME: Why don't we have analysises for some tables?
+    if analysis is None:
+        print(f"WARNING: no analysis for {tablename}.{column.name}", file=sys.stderr)
+
+    nullstr = ""
+    if analysis is not None and analysis.num_null == 0:
+        nullstr = " NOT NULL"
+
     # create the type string
     if column.definition.type == "int":
         assert column.int_width is not None
@@ -314,18 +263,19 @@ def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol) ->
         # FIXME: maybe add a comment w/ the original width
         int_string = int_sizemap.get(column.int_width, "INT")
         if column.is_unsigned:
-            defstr = f"{int_string} UNSIGNED{sql_comment_string}"
+            defstr = f"{int_string} UNSIGNED{nullstr}{sql_comment_string}"
         else:
-            defstr = f"{int_string}{sql_comment_string}"
+            defstr = f"{int_string}{nullstr}{sql_comment_string}"
 
     elif column.definition.type == "float":
-        defstr = f"FLOAT{sql_comment_string}"
+        defstr = f"FLOAT{nullstr}{sql_comment_string}"
 
     elif column.definition.type in ["string", "locstring"]:
-        defstr = f"MEDIUMTEXT{sql_comment_string}"
+        defstr = f"MEDIUMTEXT{nullstr}{sql_comment_string}"
 
     else:
         raise ValueError(f"Unknown column type: {column.definition.type}")
+
 
     # make our list of 'create' strings, with or without arrays
     if column.array_size is None or column.array_size < 2:
@@ -371,7 +321,8 @@ def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol) ->
 
 
 def dumpdbd(dbname: str, tablename: str, all_data: dbd.DbdVersionedView,
-            table_data: dbd.DbdVersionedCols, fkcols: FKReferents) -> List[str]:
+            table_data: dbd.DbdVersionedCols, fkcols: FKReferents,
+            analysis: AnalysisData) -> List[str]:
     """
     Take the parsed data, the build-specific view, and a list of foreign keys,
     and generate a bunch of MySQL `CREATE TABLE` statements. Returns a list of
@@ -403,8 +354,10 @@ def dumpdbd(dbname: str, tablename: str, all_data: dbd.DbdVersionedView,
     # cycle through every column in our view and generate SQL
     for _, column in table_data.items():
         referent_type = CTD(column.definition.type, column.is_unsigned, column.int_width)
-        referent_col = FKColumn(tablename, column.name)
-        col_create, col_index, col_fk = coltype_strings(dbname, tablename, column)
+        referent_col = DbdColumnId(tablename, column.name)
+
+        col_create, col_index, col_fk = coltype_strings(
+            dbname, tablename, column, analysis.get(referent_col, None))
 
         # is this column our id column?
         if "id" in column.annotation:
@@ -548,8 +501,8 @@ def main() -> int:
         args.definitions, skip_cache=args.no_cache, refresh_cache=args.refresh_cache)
     build = dbd.BuildId.from_string(args.build)
     view = dbds.get_view(build)
-    fkcols = get_fk_cols(args, view)  # get foreign key columns
-    analysis = get_analysis(args.analysis_file)
+    fkcols = view.get_fk_cols()
+    analysis = load_analysis(args.analysis_file)
     fk_fixup(view, fkcols, analysis, show_fixups=args.show_fixups)
 
     # check upfront so we can bail before we start generating output
@@ -591,7 +544,7 @@ def main() -> int:
     deferred = {}
 
     for table, data in view.items():
-        deferred[table] = dumpdbd(args.dbname, table, view, data, fkcols)
+        deferred[table] = dumpdbd(args.dbname, table, view, data, fkcols, analysis)
 
     for table, lines in deferred.items():
         if len(lines) > 0:

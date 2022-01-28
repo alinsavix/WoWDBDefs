@@ -5,16 +5,29 @@ import pickle
 import os
 import re
 import sys
-from collections import UserDict, UserList
+from collections import UserDict, UserList, defaultdict
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
-                    TypeVar, Union)
+                    TypeVar, Union, DefaultDict)
 import dbd
 from ppretty import ppretty
 
 BuildIdOrTuple = Union['BuildId', Tuple[int, int, int, int]]
 DbdBuildOrRange = Union[dbd.build_version, Tuple[dbd.build_version, dbd.build_version]]
-DbdVersionedView = Dict[str, 'DbdVersionedCols']
+
+
+# identifier for a specific column in a specific table
+@dataclass(init=True, repr=True, eq=True, frozen=True)
+class DbdColumnId:
+    """
+    An identifer for a specific table and column in various structures,
+    for use as a key in various dictionaries
+    """
+    table: str
+    column: str
+
+    def __str__(self):
+        return f"{self.table}.{self.column}"
 
 
 # a stupid function to make it easier to replace FKs that point at SoundEntries
@@ -34,12 +47,6 @@ def table_fk_namecheck(table: str) -> str:
 # of the information to make it easier to work with. Most of these have a
 # from_dbd() method that directly converts data from the matching parser
 # structure.
-@dataclass(init=True, repr=True)
-class DbdForeignKey:
-    table: str
-    column: str
-
-
 @dataclass(init=True, repr=True, eq=True, frozen=True)
 class BuildId:
     """
@@ -230,7 +237,7 @@ class DbdColumnDef:
     type: str  # Literal["string", "locstring", "int", "float"]
     is_confirmed_name: bool
     comment: Optional[str] = None
-    fk: Optional['DbdForeignKey'] = None
+    fk: Optional['DbdColumnId'] = None
 
     @classmethod
     def from_dbd(cls, src: dbd.column_definition):
@@ -239,7 +246,7 @@ class DbdColumnDef:
             type=src.type,
             is_confirmed_name=src.is_confirmed_name,
             comment=src.comment,
-            fk=None if not src.foreign else DbdForeignKey(
+            fk=None if not src.foreign else DbdColumnId(
                 table=table_fk_namecheck(str(src.foreign.table)),
                 column=str(src.foreign.column)
             )
@@ -311,6 +318,50 @@ class DbdVersionedCols(UserDict_DbdVersionedCols):
         return cols
 
 
+FKReferers = Dict[DbdColumnId, DbdVersionedCol]
+FKReferents = Dict[DbdColumnId, FKReferers]
+
+if TYPE_CHECKING:
+    UserDict_DbdVersionedView = UserDict[str, 'DbdVersionedCols']
+else:
+    UserDict_DbdVersionedView = UserDict
+
+class DbdVersionedView(UserDict_DbdVersionedView):
+    def get_fk_cols(self) -> FKReferents:
+        """
+        Look through all of a view's tables and find columns that are used as
+        a reference for a foreign key, so that we can add an index on them
+        later.
+
+        :return: A dict containing the definitions of referring columns, indexed
+        by referent.
+        :rtype: FKReferents
+        """
+        fkreferents: DefaultDict[DbdColumnId, FKReferers] = defaultdict(dict)
+
+        for table, data in self.data.items():
+            for column, coldata in data.items():
+                if coldata.definition.fk:
+                    fkt = coldata.definition.fk.table
+                    fkc = coldata.definition.fk.column
+
+                    # at this point we have referrent: fkt,fkc  and referer: table,column
+                    referer_key = DbdColumnId(table, column)
+                    referent_key = DbdColumnId(fkt, fkc)
+
+                    # Only store the info if the thing we're referencing exists
+                    if fkt in self.data and fkc in self.data[fkt]:
+                        coldef = self.data[table][column]
+                        fkreferents[referent_key][referer_key] = coldef
+
+                    # else:
+                    #     if fkt not in ["FileData", "SoundEntries"] and args.warn_missing_fk:
+                    #         print(
+                    #             f"WARNING: Foreign key for {table}.{column} references non-existent table or colfumn {fkt}.{fkc}", file=sys.stderr)
+
+        return fkreferents
+
+
 @dataclass(init=True, repr=True)
 class DbdFileData:
     """
@@ -355,7 +406,8 @@ class DbdDirectory(UserDict_DbdDirectory):
         :return: A 'view' of the DBD data for the requested build.
         :rtype: DbdVersionedView
         """
-        view: 'DbdVersionedView' = {}
+        view = DbdVersionedView()
+
         if isinstance(build, tuple):
             build = BuildId.from_tuple(build)
 
@@ -434,18 +486,19 @@ def load_dbd_directory_cached(path: str, skip_cache: bool = False,
 
     if os.path.exists(pickle_path) and not skip_cache:
         if refresh_cache:
-            optional_print("NOTICE: Refreshing DBD file cache, not using existing cache")
+            optional_print("NOTICE: Refreshing DBD definition cache, not using existing")
         else:
-            optional_print("NOTICE: Reading pickled dbd data from disk")
+            optional_print("NOTICE: Reading cached DBD definitions from disk")
 
             with open(pickle_path, "rb") as f:
                 try:
                     dbds = pickle.load(f)
                 except Exception as e:
-                    optional_print("WARNING: failed to read pickled data from disk")
+                    optional_print("WARNING: failed to read DBD definition cache from disk")
 
     if dbds is None:
-        optional_print("NOTICE: No (valid) cache available, directly parsing dbd data")
+        optional_print(
+            "NOTICE: No (valid) DBD definition cache available, directly parsing dbd definitions")
 
         dbds = load_dbd_directory(path)
         if not skip_cache:
