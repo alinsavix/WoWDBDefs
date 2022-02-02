@@ -53,16 +53,26 @@ def analysis_check_unsigned(analysis: AnalysisData, columns: List[DbdColumnId]) 
     return True
 
 
-negative_one_is_null = set([
-    DbdColumnId("Faction", "ID"),
-    DbdColumnId("AnimKitBoneSet", "ID"),
-    DbdColumnId("AreaTable", "ID"),
-    DbdColumnId("CreatureType", "ID"),
-    DbdColumnId("Map", "ID"),
-    DbdColumnId("AnimationData", "ID"),
-])
+# negative_one_is_null = set([
+#     DbdColumnId("Faction", "ID"),
+#     DbdColumnId("AnimKitBoneSet", "ID"),
+#     DbdColumnId("AreaTable", "ID"),
+#     DbdColumnId("CreatureType", "ID"),
+#     DbdColumnId("Map", "ID"),
+#     DbdColumnId("AnimationData", "ID"),
+# ])
 # negative_one_is_null = set()
 
+# do our best to make sure referrers and referents are consistent in our
+# schema, so mysql doesn't explode. The rules are (I think):
+#
+#  - if a column isn't a referent, take it as provided
+#
+#  - else (if a column is a referrent):
+#    - if the types agree between all referers, use that type as the referrent
+#    - if the types disagree, but all referers are unsigned or NEG_IS_NULL
+#       - make the referent unsigned and not null
+#       - make the referers unsigned and null/not_null
 def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
                    view: dbd.DbdVersionedView, fkcols: FKReferents, analysis: AnalysisData,
                    show_fixups: bool = False) -> None:
@@ -71,121 +81,147 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
             print(msg, file=sys.stderr)
 
     for column_name, column_data in table_data.items():
-        # If this column is referenced by another table/column's foreign key,
-        # generate an index for it (unless this column is already the PK).
-        # Indexes get kept until the end so that we can stuff them at the
-        # bottom of the `CREATE` block
-
         # my type and id
         referent_type = CTD(column_data.definition.type,
                             column_data.is_unsigned, column_data.int_width)
         referent_col = DbdColumnId(table_name, column_data.name)
 
+        # testing
+        # if referent_col in fkcols and referent_col in analysis:
+        #     if "NEG_IS_NULL" in analysis[referent_col].tags:
+        #         print(f"referent '{referent_col}' is NEG_IS_NULL")
 
+        #     for referer_col, referer_coldata in fkcols[referent_col].items():
+        #         if referer_col in analysis and "NEG_IS_NULL" in analysis[referer_col].tags:
+        #             print(f"referer '{referer_col}' -> '{referent_col}' is NEG_IS_NULL")
+
+        if referent_col not in fkcols:
+            continue
+
+        # else
         # if this column is referenced by another table/column's foreign key..
-        if referent_col in fkcols:
-            # survey the number of referers that are signed/unsigned, and the
-            # maximum integer width seen, so that we can derive the proper
-            # integer type for the column in us (the referent)
-            refs_signed = refs_unsigned = 0
+        # survey the number of referers that are signed/unsigned, and the
+        # maximum integer width seen, so that we can derive the proper
+        # integer type for the column in us (the referent)
+        refs_signed = refs_unsigned = 0
 
-            assert column_data.int_width is not None
-            refs_maxbits = column_data.int_width
+        assert column_data.int_width is not None
+        refs_maxbits = column_data.int_width
 
-            mismatches: List[str] = []
-            all_cols: List[str] = []
-            for referer_table, referer_coldata in fkcols[referent_col].items():
-                if referer_coldata.is_unsigned:
-                    refs_unsigned += 1
-                else:
-                    refs_signed += 1
+        if referent_col not in analysis:
+            print(
+                f"WARNING: referent '{referent_col}' has no analysis data", file=sys.stderr)
 
-                assert referer_coldata.int_width is not None
-                refs_maxbits = max(refs_maxbits, referer_coldata.int_width)
-
-                referer_type = CTD(referer_coldata.definition.type,
-                                   referer_coldata.is_unsigned, referer_coldata.int_width)
-
-                all_cols.append(
-                    f"          {referer_type}   referer: {referer_table.table}.{referer_table.column}")
-                if referent_type != referer_type:
-                    mismatches.append(
-                        f"          {referer_type}   referer: {referer_table.table}.{referer_table.column}")
-
-            # no mismatches, carry on
-            if len(mismatches) == 0:
+        mismatches: List[str] = []
+        all_cols: List[str] = []
+        for referer_col, referer_coldata in fkcols[referent_col].items():
+            if referer_col not in analysis:
+                print(
+                    f"WARNING: referer '{referer_col}' -> '{referent_col}' is not analyzed", file=sys.stderr)
                 continue
 
-            # deal with mismatches
-            # special case -- known case where the referrer is -1 when it's not
-            # referencing a row for its FK, so we can just set it to NULL
-            if referent_col in negative_one_is_null:
-                optional_print(
-                    f"FIXUP: referent {table_name}.{column_name} -> unsigned: True, bits: {refs_maxbits} (special case)")
-
-                # Make our id unsigned
-                column_data.is_unsigned = False  # FIXME: make actually unsigned!
-
-                # and make our bit width consistent all the way around
-                column_data.int_width = refs_maxbits
-                for referer_table, referer_coldata in fkcols[referent_col].items():
-                    optional_print(f"      {referer_table.table}.{referer_table.column}")
-                    referer_coldata.is_unsigned = False  # FIXME: hax
-                    referer_coldata.int_width = refs_maxbits
-
-            elif refs_signed > 0 and refs_unsigned == 0:
-                # everything is signed
-                optional_print(
-                    f"FIXUP: referent {table_name}.{column_name} -> signed: False, bits: {refs_maxbits}")
-
-                # Make our id signed
-                column_data.is_unsigned = False
-
-                # and make our bit width consistent all the way around
-                column_data.int_width = refs_maxbits
-                for referer_table, referer_coldata in fkcols[referent_col].items():
-                    optional_print(f"      {referer_table.table}.{referer_table.column}")
-                    referer_coldata.int_width = refs_maxbits
-
-            # everything is unsigned
-            elif refs_unsigned > 0 and refs_signed == 0:
-                optional_print(
-                    f"FIXUP: referent {table_name}.{column_name} -> unsigned: True, bits: {refs_maxbits}")
-
-                # Make our id signed
-                column_data.is_unsigned = True
-
-                # and make our bit width consistent all the way around
-                column_data.int_width = refs_maxbits
-                for referer_table, referer_coldata in fkcols[referent_col].items():
-                    optional_print(f"      {referer_table.table}.{referer_table.column}")
-                    referer_coldata.int_width = refs_maxbits
-
-            # The tables as listed in the DBDefs aren't consistent... how 'bout
-            # in the analysis?
-            elif analysis_check_unsigned(analysis, list(fkcols[referent_col].keys())):
-                optional_print(
-                    f"FIXUP: referent {table_name}.{column_name} -> unsigned: False, bits: {refs_maxbits} (from analysis)")
-
-                # Make our id unsigned
-                column_data.is_unsigned = True
-
-                # and make our bit width consistent all the way around
-                column_data.int_width = refs_maxbits
-                for referer_table, referer_coldata in fkcols[referent_col].items():
-                    optional_print(f"      {referer_table.table}.{referer_table.column}")
-                    referer_coldata.is_unsigned = True
-                    referer_coldata.int_width = refs_maxbits
-
-            # special case -- signed, but only because of -1 values, which
-            # can be null (and we can take care of on input)
+            x = analysis[referer_col]
+            # if referer_coldata.is_unsigned:
+            #     refs_unsigned += 1
+            # elif referer_col in analysis and "NEG_IS_NULL" in analysis[referer_col].tags:
+            #     referer_coldata.is_unsigned = True
+            #     refs_unsigned += 1
+            # else:
+            #     refs_signed += 1
+            if "UNSIGNED" in x.tags or "NEG_IS_NULL" in x.tags:
+                referer_coldata.is_unsigned = True
+                refs_unsigned += 1
             else:
-                # we have mismatches we can't fix, bitch about it
-                print(
-                    f"MISMATCH: {referent_type}   referent: {table_name}.{column_data.name} (signed: {refs_signed}  unsigned: {refs_unsigned})", file=sys.stderr)
+                referer_coldata.is_unsigned = False
+                refs_signed += 1
 
-                for col in all_cols:
-                    print(col, file=sys.stderr)
+            assert referer_coldata.int_width is not None
+            refs_maxbits = max(refs_maxbits, referer_coldata.int_width)
+
+            referer_type = CTD(referer_coldata.definition.type,
+                               referer_coldata.is_unsigned, referer_coldata.int_width)
+
+            all_cols.append(
+                f"          {referer_type}   referer: {referer_col.table}.{referer_col.column}")
+
+            if referent_type != referer_type:
+                mismatches.append(
+                    f"          {referer_type}   referer: {referer_col.table}.{referer_col.column}")
+
+        # no mismatches, carry on
+        if len(mismatches) == 0:
+            continue
+
+        # deal with mismatches
+        # special case -- known case where the referrer is -1 when it's not
+        # referencing a row for its FK, so we can just set it to NULL
+        # if referent_col in negative_one_is_null:
+        #     optional_print(
+        #         f"FIXUP: referent {table_name}.{column_name} -> unsigned: True, bits: {refs_maxbits} (special case)")
+
+        #     # Make our id unsigned
+        #     column_data.is_unsigned = False  # FIXME: make actually unsigned!
+
+        #     # and make our bit width consistent all the way around
+        #     column_data.int_width = refs_maxbits
+        #     for referer_col, referer_coldata in fkcols[referent_col].items():
+        #         optional_print(f"      {referer_col.table}.{referer_col.column}")
+        #         referer_coldata.is_unsigned = False  # FIXME: hax
+        #         referer_coldata.int_width = refs_maxbits
+        # else
+        if refs_signed > 0 and refs_unsigned == 0:
+            # everything is signed
+            optional_print(
+                f"FIXUP: referent {table_name}.{column_name} -> signed: False, bits: {refs_maxbits}")
+
+            # Make our id signed
+            column_data.is_unsigned = False
+
+            # and make our bit width consistent all the way around
+            column_data.int_width = refs_maxbits
+            for referer_col, referer_coldata in fkcols[referent_col].items():
+                optional_print(f"      {referer_col.table}.{referer_col.column}")
+                referer_coldata.int_width = refs_maxbits
+
+        # everything is unsigned
+        elif refs_unsigned > 0 and refs_signed == 0:
+            optional_print(
+                f"FIXUP: referent {table_name}.{column_name} -> unsigned: True, bits: {refs_maxbits}")
+
+            # Make our id signed
+            column_data.is_unsigned = True
+
+            # and make our bit width consistent all the way around
+            column_data.int_width = refs_maxbits
+            for referer_col, referer_coldata in fkcols[referent_col].items():
+                optional_print(f"      {referer_col.table}.{referer_col.column}")
+                referer_coldata.int_width = refs_maxbits
+
+        # The tables as listed in the DBDefs aren't consistent... how 'bout
+        # in the analysis?
+        elif analysis_check_unsigned(analysis, list(fkcols[referent_col].keys())):
+            optional_print(
+                f"FIXUP: referent {table_name}.{column_name} -> unsigned: False, bits: {refs_maxbits} (from analysis)")
+
+            # Make our id unsigned
+            column_data.is_unsigned = True
+
+            # and make our bit width consistent all the way around
+            column_data.int_width = refs_maxbits
+            for referer_col, referer_coldata in fkcols[referent_col].items():
+                optional_print(f"      {referer_col.table}.{referer_col.column}")
+                referer_coldata.is_unsigned = True
+                referer_coldata.int_width = refs_maxbits
+
+        # special case -- signed, but only because of -1 values, which
+        # can be null (and we can take care of on input)
+        else:
+            # we have mismatches we can't fix, bitch about it
+            print(
+                f"MISMATCH: {referent_type}   referent: {table_name}.{column_data.name} (signed: {refs_signed}  unsigned: {refs_unsigned})", file=sys.stderr)
+
+            for col in all_cols:
+                print(col, file=sys.stderr)
 
 
 def fk_fixup(view: dbd.DbdVersionedView, fkcols: FKReferents, analysis: AnalysisData,
@@ -201,10 +237,10 @@ int_sizemap = {
     64: "BIGINT",
 }
 
-int_signmap = {
-    False: "",
-    True: " UNSIGNED",
-}
+# int_signmap = {
+#     False: "",
+#     True: " UNSIGNED",
+# }
 
 def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol,
                     analysis: Optional[DbdColumnAnalysis]) -> Tuple[List[str], List[str], List[str]]:
@@ -248,12 +284,12 @@ def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol,
         else:
             sql_comment_string = f" COMMENT '{comments}{annotations}'"
 
-    # FIXME: Why don't we have analysises for some tables?
+
     if analysis is None:
         print(f"WARNING: no analysis for {tablename}.{column.name}", file=sys.stderr)
 
     nullstr = ""
-    if analysis is not None and analysis.num_null == 0:
+    if analysis is not None and "NOT_NULL" in analysis.tags:
         nullstr = " NOT NULL"
 
     # create the type string
@@ -543,7 +579,7 @@ def main() -> int:
     # deferred statements to add to `ALTER` at the end
     deferred = {}
 
-    for table, data in view.items():
+    for table, data in sorted(view.items()):
         deferred[table] = dumpdbd(args.dbname, table, view, data, fkcols, analysis)
 
     for table, lines in deferred.items():

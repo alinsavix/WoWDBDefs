@@ -3,36 +3,45 @@ import csv
 import os
 import re
 import sys
-import typing
+from typing import Dict, Any
 
 from ppretty import ppretty
 
+# sqlalchemy is mostly overkill, but it makes things easy.
 import sqlalchemy
 from sqlalchemy import MetaData, Table, create_engine, insert, text
+from dataclasses import dataclass
+from dbdwrapper import DbdColumnId
+from dbdanalyze import DbdColumnAnalysis, load_analysis, AnalysisData
+
 
 directory = "dbd-920dbcs41257"
 dbstring = "mysql+pymysql://root@localhost/wowdbd"
-table = "AdventureJournal"
+# table = "AdventureJournal"
 
-array_re = re.compile(r"\[(.*?)\]")
-def load_one(engine, directory: str, tablename: str):
+array_re = re.compile(r"\[\d+\]$")
+
+def load_one(engine, directory: str, tablename: str, analysis: AnalysisData):
     print(f"Loading {tablename}...")
     file = tablename + ".csv"
 
-    # with engine.begin() as conn:
-    #     conn.execute(
-    #         text("INSERT INTO some_table (x, y) VALUES (:x, :y)"),
-    #         [{"x": 11, "y": 12}, {"x": 13, "y": 14}]
-    #     )
-    #     # conn.execute(things)
-    #     pass
     rows = []
     with open(os.path.join(directory, file), newline="") as csvfile:
         reader = csv.DictReader(csvfile, dialect='excel')
         for row in reader:
-            # prow = {re.sub(array_re, r"__\g<1>", k): v for k, v in row.items()}
-            prow = {k: v for k, v in row.items()}
+            prow = {}
+            for k, v in row.items():
+                prow[k] = v if v != "" else None
+
+                cid = DbdColumnId(tablename, array_re.sub("", k))
+                if cid not in analysis:
+                    print(f"No analysis for {cid}")
+                if cid in analysis and "NEG_IS_NULL" in analysis[cid].tags and int(v) < 0:
+                    prow[k] = None
+
             rows.append(prow)
+
+    # print(ppretty(rows, seq_length=999999))
 
     metadata_obj = MetaData()
 
@@ -56,27 +65,18 @@ def load_one(engine, directory: str, tablename: str):
         # print(result)
 
 
-def main():
+def main() -> int:
+    analysis = load_analysis("analysis.csv")
     engine = create_engine(dbstring, echo=False, future=True)
-    # conn = engine.connect()
-    # result = conn.execute(text(f"SET foreign_key_checks = 0"))
-    # result = conn.execute(text(f"TRUNCATE {table}"))
-    # print(result.all())
-    # metadata_obj = MetaData()
-    # some_table = Table("Achievement", metadata_obj, autoload_with=engine)
-    # print(ppretty(some_table))
-
-    table = "Lock"
-    load_one(engine, directory, table)
-    # return 0
-    # db = records.Database('mysql+pymysql://root@localhost/wowdbd')
 
     for file in sorted(os.listdir(directory)):
         filename = os.fsdecode(file)
         if filename.endswith(".csv"):
             table_name = filename.replace(".csv", "")
-            load_one(engine, directory, table_name)
-            # continue
+            load_one(engine, directory, table_name, analysis)
+
+    return 0
 
 
-main()
+if __name__ == "__main__":
+    sys.exit(main())

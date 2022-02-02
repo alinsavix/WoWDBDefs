@@ -4,6 +4,7 @@ import csv
 import dataclasses
 import os
 import sys
+import re
 from collections import UserDict
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
@@ -224,6 +225,10 @@ def generate_stats(column: List[str]) -> DbdColumnAnalysis:
 def infer_type(analysis: DbdColumnAnalysis) -> DbdAnalysisTags:
     tags = DbdAnalysisTags()
 
+    if analysis.num_rows == 0:
+        tags.add("NO_DATA")
+        return tags
+
     if analysis.num_rows <= 2:
         tags.add("INSUFFICIENT_DATA")
         return tags
@@ -244,6 +249,8 @@ def infer_type(analysis: DbdColumnAnalysis) -> DbdAnalysisTags:
 
     if analysis.num_null == 0:
         tags.add("NOT_NULL")
+    else:
+        tags.add("NULLABLE")
 
     if analysis.num_dupe == 0:
         tags.add("UNIQUE")
@@ -254,31 +261,74 @@ def infer_type(analysis: DbdColumnAnalysis) -> DbdAnalysisTags:
 
         if analysis.num_zero == 0:
             tags.add("NOT_ZERO")
+        else:
+            tags.add("HAX_ZERO")
 
     return tags
 
+
+def print_analysis(tablename: str, colname: str, analysis: DbdColumnAnalysis, fkstr: str) -> None:
+    line = f"{tablename},{colname},{analysis.num_rows},{analysis.num_int},{analysis.num_float},{analysis.num_str},{analysis.num_null},{analysis.num_dupe},{analysis.num_zero},{analysis.num_negative},{analysis.val_min},{analysis.val_max},{analysis.need_bits},{analysis.len_min},{analysis.len_max},{' '.join(analysis.tags)},{fkstr},{' '.join(analysis.issues)}"
+    print(line.replace("None", ""))
+
+
+# output some hand-crafted artisinal data for tables that don't exist locally
+def print_missing(tablename, view: dbdwrapper.DbdVersionedView) -> None:
+    table = view[tablename]
+    for colname, coldata in table.items():
+        analysis = DbdColumnAnalysis()
+        analysis.tags.add("NO_TABLE")
+        analysis.issues = DbdAnalysisIssues(["NO_TABLE"])
+
+        # We have no actual data, so fill in what we can from the dbd
+        if coldata.definition.type == "int":
+            analysis.tags.add("INT")
+        elif coldata.definition.type == "float":
+            analysis.tags.add("FLOAT")
+        elif coldata.definition.type == "string" or coldata.definition.type == "locstring":
+            analysis.tags.add("STRING")
+
+        # FIXME: deduplicate
+        fkstr = ""
+        if tablename in view and colname in view[tablename]:
+            if view[tablename][colname].definition.fk:
+                analysis.fk = view[tablename][colname].definition.fk
+                assert analysis.fk is not None
+                fkstr = str(analysis.fk)
+
+        print_analysis(tablename, colname, analysis, fkstr)
+
+
+array_re = re.compile(r"\[\d+\]$")
 
 def analyze_table(directory: str, tablename: str, view: dbdwrapper.DbdVersionedView, fkcols: Set[str]) -> None:
     file = tablename + ".csv"
     data: Dict[str, List[str]] = {}
 
-    with open(os.path.join(directory, file), newline="") as csvfile:
-        reader = csv.DictReader(csvfile, dialect='excel')
-        for row in reader:
-            for k in row.keys():
-                if k not in data:
-                    data[k] = []
-                data[k].append(row[k])
-
+    try:
+        with open(os.path.join(directory, file), newline="") as csvfile:
+            reader = csv.DictReader(csvfile, dialect='excel')
+            for row in reader:
+                for k in row.keys():
+                    if k not in data:
+                        data[k] = []
+                    data[k].append(row[k])
+    except FileNotFoundError:
+        print(f"WARNING: No CSV available for {tablename}", file=sys.stderr)
+        print_missing(tablename, view)
+        return
 
     table_analysis = DbdTableAnalysis()
 
     for colname, values in data.items():
         # Assume the info for all columns in an array'd column are the same
-        if colname.endswith("[0]"):
-            colname = colname.replace("[0]", "")
-        elif colname.endswith("]"):
-            continue
+        # FIXME: temporary hack to use the _last_ column (by analyzing all,
+        # and overwriting)
+        # if colname.endswith("[0]"):
+        #     colname = colname.replace("[0]", "")
+        # elif colname.endswith("]"):
+        #     continue
+        colname = array_re.sub("", colname)
 
         analysis = generate_stats(values)
         analysis.tags = infer_type(analysis)
@@ -291,34 +341,28 @@ def analyze_table(directory: str, tablename: str, view: dbdwrapper.DbdVersionedV
                 assert analysis.fk is not None
                 fkstr = str(analysis.fk)
 
-                # if a column references a FK, and that column has only one
-                # distinct negative value, and that value is -1, then treat
-                # -1 as null, and make the column unsigned and nullable.
-                if analysis.num_negative == 1 and analysis.val_min == -1:
-                    analysis.tags.remove("NOT_NULL")
-                    analysis.tags.add("NEG_ONE_IS_NULL")
-                    analysis.tags.add("UNSIGNED")
+                # if an int column references a FK, and that column has only
+                # one distinct negative value, and that value is pretty close
+                # to zero, then treat negatives in that column as null, and
+                # make the column unsigned and nullable. (most tables use -1
+                # as the canary value for this, but at least one uses -2)
+                if "int" in analysis.seen_types:
+                    assert analysis.val_min is not None
+                    if analysis.num_negative == 1 and analysis.val_min >= -2:
+                        analysis.tags.remove("NOT_NULL")
+                        analysis.tags.add("NEG_IS_NULL")
+                        analysis.tags.add("UNSIGNED")
 
             analysis.issues = compare_data(
                 tablename, colname, analysis, view[tablename][colname], fkcols)
             table_analysis[colname] = analysis
 
-        line = f"{tablename},{colname},{analysis.num_rows},{analysis.num_int},{analysis.num_float},{analysis.num_str},{analysis.num_null},{analysis.num_dupe},{analysis.num_zero},{analysis.num_negative},{analysis.val_min},{analysis.val_max},{analysis.need_bits},{analysis.len_min},{analysis.len_max},{' '.join(analysis.tags)},{fkstr},{' '.join(analysis.issues)}"
-        print(line.replace("None", ""))
+        print_analysis(tablename, colname, analysis, fkstr)
+        # line = f"{tablename},{colname},{analysis.num_rows},{analysis.num_int},{analysis.num_float},{analysis.num_str},{analysis.num_null},{analysis.num_dupe},{analysis.num_zero},{analysis.num_negative},{analysis.val_min},{analysis.val_max},{analysis.need_bits},{analysis.len_min},{analysis.len_max},{' '.join(analysis.tags)},{fkstr},{' '.join(analysis.issues)}"
+        # print(line.replace("None", ""))
 
     # add a blank line between tables
     print()
-
-
-def from_dict_to_dataclass(cls, data):
-    # print(ppretty(inspect.signature(DbdColumnAnalysis).parameters.items()))
-
-    return cls(
-        **{
-            key: (data[key] if val.default == val.empty else data.get(key, val.default))
-            for key, val in inspect.signature(DbdColumnAnalysis).parameters.items()
-        }
-    )
 
 
 if TYPE_CHECKING:
@@ -347,32 +391,34 @@ def main():
     directory = "dbd-920dbcs41257"
 
     dbds = dbdwrapper.load_dbd_directory_cached("../../definitions", silent=False)
-    build = dbdwrapper.BuildId.from_string("9.1.5.41488")
+    build = dbdwrapper.BuildId.from_string("9.2.0.41257")
     view = dbds.get_view(build)
     fkcols = view.get_fk_cols()
 
     print("table,column,num_rows,num_int,num_float,num_str,num_null,num_dupe,num_zero,num_negative,val_min,val_max,need_bits,len_min,len_max,tags,FK,issues")
 
-    for file in sorted(os.listdir(directory)):
-        filename = os.fsdecode(file)
-        if filename.endswith(".csv"):
-            tablename = filename.replace(".csv", "")
-            analyze_table(directory, tablename, view, fkcols)
-            continue
+    # for file in sorted(os.listdir(directory)):
+    for tablename in sorted(view.keys()):
+        analyze_table(directory, tablename, view, fkcols)
+        # filename = os.fsdecode(file)
+        # if filename.endswith(".csv"):
+        #     tablename = filename.replace(".csv", "")
+        #     analyze_table(directory, tablename, view, fkcols)
+        #     continue
 
-    # info = determine_type(values)
+        # info = determine_type(values)
 
-    # exist_count = info["num_rows"] - info["num_null"]
-    # exist_pct = (exist_count / info["num_rows"]) * 100.0
-    # print(f"info for {column}:")
-    # print(f"  types seen: {len(info['seen_types'])} ({','.join(info['seen_types'])})")
-    # print(f"  int: {info['num_int']}  float: {info['num_float']}  string: {info['num_str']}")
-    # print(f"  total rows: {info['num_rows']}")
-    # print(f"  rows with values: {exist_count} ({exist_pct:.2f}%)")
-    # print(f"table_nacolumn_nameth duplicate values: {info['num_dupe']}")
-    # print(f"  rows with zero values: {info['num_zero']}")
-    # print(f"  rows with negative values: {info['num_negative']}")
-    # print(f"  row min/max: {info['val_min']}/{info['val_max']}")
+        # exist_count = info["num_rows"] - info["num_null"]
+        # exist_pct = (exist_count / info["num_rows"]) * 100.0
+        # print(f"info for {column}:")
+        # print(f"  types seen: {len(info['seen_types'])} ({','.join(info['seen_types'])})")
+        # print(f"  int: {info['num_int']}  float: {info['num_float']}  string: {info['num_str']}")
+        # print(f"  total rows: {info['num_rows']}")
+        # print(f"  rows with values: {exist_count} ({exist_pct:.2f}%)")
+        # print(f"table_nacolumn_nameth duplicate values: {info['num_dupe']}")
+        # print(f"  rows with zero values: {info['num_zero']}")
+        # print(f"  rows with negative values: {info['num_negative']}")
+        # print(f"  row min/max: {info['val_min']}/{info['val_max']}")
 
 
 if __name__ == "__main__":

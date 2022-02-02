@@ -285,6 +285,7 @@ class DbdVersionedCol:
     comment: Optional[str] = None
     int_width: Optional[int] = None
     is_unsigned: bool = True
+    extra: Set[str] = dataclasses.field(default_factory=set)  # for user use
 
     @classmethod
     def from_dbd(cls, src: dbd.definition_entry, definition: 'DbdColumnDef') -> 'DbdVersionedCol':
@@ -345,7 +346,7 @@ class DbdVersionedView(UserDict_DbdVersionedView):
                     fkt = coldata.definition.fk.table
                     fkc = coldata.definition.fk.column
 
-                    # at this point we have referrent: fkt,fkc  and referer: table,column
+                    # at this point we have referent: fkt,fkc  and referer: table,column
                     referer_key = DbdColumnId(table, column)
                     referent_key = DbdColumnId(fkt, fkc)
 
