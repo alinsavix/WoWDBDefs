@@ -20,7 +20,7 @@ from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
 import dbdwrapper as dbd
 from dbdwrapper import DbdColumnId
-from dbdanalyze import DbdColumnAnalysis, load_analysis, AnalysisData
+from dbdanalyze import load_analysis, AnalysisData
 from ppretty import ppretty
 
 # from ppretty import ppretty
@@ -46,10 +46,13 @@ FKReferents = Dict[DbdColumnId, FKReferers]
 
 def analysis_check_unsigned(analysis: AnalysisData, columns: List[DbdColumnId]) -> bool:
     for col in columns:
-        if col not in analysis:
+        col_analysis = analysis.for_column(col)
+        if col_analysis is None:
             continue
-        if analysis[col].num_negative != 0:
+
+        if col_analysis.num_negative != 0:
             return False
+
     return True
 
 
@@ -108,19 +111,21 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
         assert column_data.int_width is not None
         refs_maxbits = column_data.int_width
 
-        if referent_col not in analysis:
+        # FIXME: make fewer calls to analysis_colname
+        a_referent = analysis.for_column(referent_col)
+        if not a_referent:
             print(
                 f"WARNING: referent '{referent_col}' has no analysis data", file=sys.stderr)
 
         mismatches: List[str] = []
         all_cols: List[str] = []
         for referer_col, referer_coldata in fkcols[referent_col].items():
-            if referer_col not in analysis:
+            a_referer = analysis.for_column(referer_col)
+            if not a_referer:
                 print(
                     f"WARNING: referer '{referer_col}' -> '{referent_col}' is not analyzed", file=sys.stderr)
                 continue
 
-            x = analysis[referer_col]
             # if referer_coldata.is_unsigned:
             #     refs_unsigned += 1
             # elif referer_col in analysis and "NEG_IS_NULL" in analysis[referer_col].tags:
@@ -128,7 +133,7 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
             #     refs_unsigned += 1
             # else:
             #     refs_signed += 1
-            if "UNSIGNED" in x.tags or "NEG_IS_NULL" in x.tags:
+            if "UNSIGNED" in a_referer.tags or "NEG_IS_NULL" in a_referer.tags:
                 referer_coldata.is_unsigned = True
                 refs_unsigned += 1
             else:
@@ -242,25 +247,12 @@ int_sizemap = {
 #     True: " UNSIGNED",
 # }
 
-def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol,
-                    analysis: Optional[DbdColumnAnalysis]) -> Tuple[List[str], List[str], List[str]]:
-    """
-    Generate the type string for a given column, based on DBD data
-
-    :param column: A versioned column struct from DBD data
-    :type column: dbd.DbdVersionedCol
-    :return: A tuple of lists of strings, with possible column definitions, index
-    definitions, and foreign key definitions for the column in question. These
-    will always be generated, but should only be used by the caller if/when they
-    are appropriate and needed
-    :rtype: Tuple[List[str], List[str], List[str]]
-    """
-
-    # string to write the column definition into, so that we can array it if we
-    # need to
+def coltype_one(dbname: str, tablename: str, colname: str, column: dbd.DbdVersionedCol,
+                analysis: AnalysisData) -> Tuple[str, str, Optional[str]]:
+    # string to write the column definition into
     defstr: Optional[str] = None
 
-    #
+    # FIXME: move comment/annotation handling to outer function
     # create annotation strings (for adding comments)
     annotations = ""
     if len(column.annotation) > 0:
@@ -284,12 +276,12 @@ def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol,
         else:
             sql_comment_string = f" COMMENT '{comments}{annotations}'"
 
-
-    if analysis is None:
-        print(f"WARNING: no analysis for {tablename}.{column.name}", file=sys.stderr)
+    a_column = analysis.for_column(DbdColumnId(tablename, colname))
+    if a_column is None:
+        print(f"WARNING: no analysis for {tablename}.{colname}", file=sys.stderr)
 
     nullstr = ""
-    if analysis is not None and "NOT_NULL" in analysis.tags:
+    if a_column is not None and "NOT_NULL" in a_column.tags:
         nullstr = " NOT NULL"
 
     # create the type string
@@ -312,48 +304,60 @@ def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol,
     else:
         raise ValueError(f"Unknown column type: {column.definition.type}")
 
+    # The column def
+    column_return = f"  `{colname}` {defstr}"
 
-    # make our list of 'create' strings, with or without arrays
-    if column.array_size is None or column.array_size < 2:
-        column_return = [f"  `{column.name}` {defstr}"]
-    else:
-        column_return = [
-            f"  `{column.name}[{i}]` {defstr}" for i in range(0, column.array_size)]
-
-    # make our list of index strings, with or without arrays
+    # The index def (which may or may not be used)
     if column.definition.type == "int" or column.definition.type == "float":
-        if column.array_size is None or column.array_size < 2:
-            index_return = [f"  INDEX `{column.name}_idx` (`{column.name}`)"]
-        else:
-            index_return = [
-                f"  INDEX `{column.name}_{i}_idx` (`{column.name}[{i}]`)" for i in range(0, column.array_size)
-            ]
+        index_return = f"  INDEX `{colname}_idx` (`{colname}`)"
     else:  # string
-        if column.array_size is None or column.array_size < 2:
-            index_return = [f"  FULLTEXT `{column.name}_idx` (`{column.name}`)"]
-        else:
-            index_return = [
-                f"  FULLTEXT `{column.name}_{i}_idx` (`{column.name}[{i}]`)" for i in range(0, column.array_size)
-            ]
+        index_return = f"  FULLTEXT `{colname}_idx` (`{colname}`)"
 
-    # make our list of FK strings, with or without arrays, if there's a FK.
+    # make our FK string, if there's a FK.
     #
     # Unlike the others, we don't generate the constraint string at all (rather
     # than creating it and not using if it isn't needed) because if there's not
     # actually a FK, we can't even create a valid FK creation string.
-    fk_return = []
+    fk_return = None
     if column.definition.fk:
         fk = column.definition.fk
-        if column.array_size is None or column.array_size < 2:
-            fk_return = [
-                f"  ADD CONSTRAINT `{tablename}_{column.name}` FOREIGN KEY (`{column.name}`) REFERENCES `{dbname}`.`{fk.table}` (`{fk.column}`)"
-            ]
-        else:
-            fk_return = [
-                f"  ADD CONSTRAINT `{tablename}_{column.name}_{i}` FOREIGN KEY (`{column.name}[{i}]`) REFERENCES `{dbname}`.`{fk.table}` (`{fk.column}`)" for i in range(0, column.array_size)
-            ]
+        fk_return = f"  ADD CONSTRAINT `{tablename}_{colname}` FOREIGN KEY (`{colname}`) REFERENCES `{dbname}`.`{fk.table}` (`{fk.column}`)"
 
     return (column_return, index_return, fk_return)
+
+
+def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol,
+                    analysis: AnalysisData) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Generate the type string for a given column, based on DBD data
+
+    :param column: A versioned column struct from DBD data
+    :type column: dbd.DbdVersionedCol
+    :return: A tuple of lists of strings, with possible column definitions, index
+    definitions, and foreign key definitions for the column in question. These
+    will always be generated, but should only be used by the caller if/when they
+    are appropriate and needed
+    :rtype: Tuple[List[str], List[str], List[str]]
+    """
+
+    if column.array_size is None or column.array_size == 1:
+        # single-element arrays are just a single column
+        defstr, idxstr, fkstr = coltype_one(dbname, tablename, column.name, column, analysis)
+        return [defstr], [idxstr], [fkstr] if fkstr is not None else []
+
+    # else
+    defarr = []
+    idxarr = []
+    fkarr = []
+    for i in range(column.array_size):
+        defstr, idxstr, fkstr = coltype_one(
+            dbname, tablename, f"{column.name}[{i}]", column, analysis)
+        defarr.append(defstr)
+        idxarr.append(idxstr)
+        if fkstr is not None:
+            fkarr.append(fkstr)
+
+    return defarr, idxarr, fkarr
 
 
 def dumpdbd(dbname: str, tablename: str, all_data: dbd.DbdVersionedView,
@@ -393,7 +397,7 @@ def dumpdbd(dbname: str, tablename: str, all_data: dbd.DbdVersionedView,
         referent_col = DbdColumnId(tablename, column.name)
 
         col_create, col_index, col_fk = coltype_strings(
-            dbname, tablename, column, analysis.get(referent_col, None))
+            dbname, tablename, column, analysis)
 
         # is this column our id column?
         if "id" in column.annotation:

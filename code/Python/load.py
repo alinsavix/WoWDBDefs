@@ -12,7 +12,7 @@ import sqlalchemy
 from sqlalchemy import MetaData, Table, create_engine, insert, text
 from dataclasses import dataclass
 from dbdwrapper import DbdColumnId
-from dbdanalyze import DbdColumnAnalysis, load_analysis, AnalysisData
+from dbdanalyze import load_analysis, AnalysisData
 
 
 directory = "dbd-920dbcs41257"
@@ -30,14 +30,14 @@ def load_one(engine, directory: str, tablename: str, analysis: AnalysisData):
         reader = csv.DictReader(csvfile, dialect='excel')
         for row in reader:
             prow = {}
-            for k, v in row.items():
-                prow[k] = v if v != "" else None
+            for colname, colval in row.items():
+                prow[colname] = colval if colval != "" else None
 
-                cid = DbdColumnId(tablename, array_re.sub("", k))
-                if cid not in analysis:
-                    print(f"No analysis for {cid}")
-                if cid in analysis and "NEG_IS_NULL" in analysis[cid].tags and int(v) < 0:
-                    prow[k] = None
+                a_column = analysis.for_column(DbdColumnId(tablename, colname))
+                if a_column is None:
+                    print(f"No analysis for {tablename}.{colname}")
+                elif "NEG_IS_NULL" in a_column.tags and int(colval) < 0:
+                    prow[colname] = None
 
             rows.append(prow)
 

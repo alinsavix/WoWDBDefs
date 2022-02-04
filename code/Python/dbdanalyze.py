@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 import inspect
 
-import dbdwrapper
+import dbdwrapper as dbd
 from dbdwrapper import DbdColumnId
 from ppretty import ppretty
 
@@ -22,6 +22,23 @@ class DbdAnalysisTags(Set[str]):
 class DbdAnalysisIssues(Set[str]):
     def __str__(self):
         return " ".join(sorted(self))
+
+def nonemin(a: Optional[Union[int, float]],
+            b: Optional[Union[int, float]]) -> Optional[Union[int, float]]:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return min(a, b)
+
+def nonemax(a: Optional[Union[int, float]],
+            b: Optional[Union[int, float]]) -> Optional[Union[int, float]]:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
 
 @dataclass
 class DbdColumnAnalysis:
@@ -35,6 +52,7 @@ class DbdColumnAnalysis:
     num_dupe: int = 0
     num_zero: int = 0
     num_negative: int = 0
+    num_neg_vals: int = 0
 
     val_min: Union[int, float, None] = None
     val_max: Union[int, float, None] = None
@@ -48,6 +66,44 @@ class DbdColumnAnalysis:
     issues: DbdAnalysisIssues = dataclasses.field(default_factory=DbdAnalysisIssues)
 
     fk: Optional[DbdColumnId] = None
+
+    # FIXME: can this be simplified? very repetitive
+    def __add__(self, d):
+        analysis = DbdColumnAnalysis()
+        analysis.num_rows = self.num_rows + d.num_rows
+
+        analysis.num_null = self.num_null + d.num_null
+        analysis.num_int = self.num_int + d.num_int
+        analysis.num_float = self.num_float + d.num_float
+        analysis.num_str = self.num_str + d.num_str
+
+        analysis.num_dupe = self.num_dupe + d.num_dupe
+        analysis.num_zero = self.num_zero + d.num_zero
+        analysis.num_negative = self.num_negative + d.num_negative
+
+        # a special case -- if we're using a negative value as a canary for
+        # 'null', detect that by there only being one negative value used
+        # across the entirety of the related columns.
+        # FIXME: Can we do better?
+        if self.num_neg_vals == 1 and d.num_neg_vals == 1 and self.val_min == d.val_min:
+            analysis.num_neg_vals = 1
+        else:
+            analysis.num_neg_vals = self.num_neg_vals + d.num_neg_vals
+
+        analysis.val_min = nonemin(self.val_min, d.val_min)
+        analysis.val_max = nonemax(self.val_max, d.val_max)
+        analysis.need_bits = nonemax(self.need_bits, d.need_bits)
+
+        analysis.len_min = nonemin(self.len_min, d.len_min)
+        analysis.len_max = nonemax(self.len_max, d.len_max)
+
+        analysis.seen_types = self.seen_types.union(d.seen_types)
+        analysis.tags = self.tags.union(d.tags)
+        analysis.issues = self.issues.union(d.issues)
+
+        analysis.fk = self.fk  # different columns can't have different FKs
+
+        return analysis
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "DbdColumnAnalysis":
@@ -77,6 +133,7 @@ class DbdColumnAnalysis:
             num_dupe=int(d["num_dupe"]),
             num_zero=int(d["num_zero"]),
             num_negative=int(d["num_negative"]),
+            num_neg_vals=int(d["num_neg_vals"]),
 
             val_min=int_float_none(d["val_min"]),
             val_max=int_float_none(d["val_max"]),
@@ -102,8 +159,23 @@ class DbdTableAnalysis(UserDict_DbdTableAnalysis):
     pass
 
 
+# We basically are going to split array columns into "first entry" and "every
+# other entry", this will return the column name to use for generating/using
+# the analysis.
+def analysis_colname(colname: str) -> str:
+    if not colname.endswith("]"):
+        return colname
+
+    if colname.endswith("[0]"):
+        return colname
+
+    # else
+
+    return array_re.sub("", colname) + "[x]"
+
+
 def compare_data(tablename: str, colname: str, analysis: DbdColumnAnalysis,
-                 coldata: dbdwrapper.DbdVersionedCol, fkcols: Set[str]) -> DbdAnalysisIssues:
+                 coldata: dbd.DbdVersionedCol, fkcols: dbd.FKReferents) -> DbdAnalysisIssues:
 
     diffs = DbdAnalysisIssues()
 
@@ -164,6 +236,7 @@ def generate_stats(column: List[str]) -> DbdColumnAnalysis:
 
             if x < 0:
                 analysis.num_negative += 1
+                analysis.num_neg_vals += 1
 
             if x == 0:
                 analysis.num_zero += 1
@@ -189,6 +262,7 @@ def generate_stats(column: List[str]) -> DbdColumnAnalysis:
 
             if x < 0:
                 analysis.num_negative += 1
+                analysis.num_neg_vals += 1
 
             if x == 0:
                 analysis.num_zero += 1
@@ -262,18 +336,18 @@ def infer_type(analysis: DbdColumnAnalysis) -> DbdAnalysisTags:
         if analysis.num_zero == 0:
             tags.add("NOT_ZERO")
         else:
-            tags.add("HAX_ZERO")
+            tags.add("HAS_ZERO")
 
     return tags
 
 
 def print_analysis(tablename: str, colname: str, analysis: DbdColumnAnalysis, fkstr: str) -> None:
-    line = f"{tablename},{colname},{analysis.num_rows},{analysis.num_int},{analysis.num_float},{analysis.num_str},{analysis.num_null},{analysis.num_dupe},{analysis.num_zero},{analysis.num_negative},{analysis.val_min},{analysis.val_max},{analysis.need_bits},{analysis.len_min},{analysis.len_max},{' '.join(analysis.tags)},{fkstr},{' '.join(analysis.issues)}"
+    line = f"{tablename},{colname},{analysis.num_rows},{analysis.num_int},{analysis.num_float},{analysis.num_str},{analysis.num_null},{analysis.num_dupe},{analysis.num_zero},{analysis.num_negative},{analysis.num_neg_vals},{analysis.val_min},{analysis.val_max},{analysis.need_bits},{analysis.len_min},{analysis.len_max},{' '.join(sorted(analysis.tags))},{fkstr},{' '.join(sorted(analysis.issues))}"
     print(line.replace("None", ""))
 
 
 # output some hand-crafted artisinal data for tables that don't exist locally
-def print_missing(tablename, view: dbdwrapper.DbdVersionedView) -> None:
+def print_missing(tablename, view: dbd.DbdVersionedView) -> None:
     table = view[tablename]
     for colname, coldata in table.items():
         analysis = DbdColumnAnalysis()
@@ -299,9 +373,10 @@ def print_missing(tablename, view: dbdwrapper.DbdVersionedView) -> None:
         print_analysis(tablename, colname, analysis, fkstr)
 
 
-array_re = re.compile(r"\[\d+\]$")
+array_re = re.compile(r"\[[x0-9]+\]$")
 
-def analyze_table(directory: str, tablename: str, view: dbdwrapper.DbdVersionedView, fkcols: Set[str]) -> None:
+def analyze_table(directory: str, tablename: str, view: dbd.DbdVersionedView,
+                  fkcols: dbd.FKReferents) -> None:
     file = tablename + ".csv"
     data: Dict[str, List[str]] = {}
 
@@ -328,16 +403,27 @@ def analyze_table(directory: str, tablename: str, view: dbdwrapper.DbdVersionedV
         #     colname = colname.replace("[0]", "")
         # elif colname.endswith("]"):
         #     continue
-        colname = array_re.sub("", colname)
+        a_colname = analysis_colname(colname)
 
         analysis = generate_stats(values)
+
+        # print(f"{a_colname} analysis: {analysis}")
+
+        if a_colname in table_analysis:
+            table_analysis[a_colname] += analysis
+        else:
+            table_analysis[a_colname] = analysis
+
+    # got the analysis done, now learn about it
+    for a_colname, analysis in table_analysis.items():
         analysis.tags = infer_type(analysis)
         analysis.issues = DbdAnalysisIssues("NO_DBD_INFO")
 
+        b_colname = array_re.sub("", a_colname)
         fkstr = ""
-        if tablename in view and colname in view[tablename]:
-            if view[tablename][colname].definition.fk:
-                analysis.fk = view[tablename][colname].definition.fk
+        if tablename in view and b_colname in view[tablename]:
+            if view[tablename][b_colname].definition.fk:
+                analysis.fk = view[tablename][b_colname].definition.fk
                 assert analysis.fk is not None
                 fkstr = str(analysis.fk)
 
@@ -348,16 +434,16 @@ def analyze_table(directory: str, tablename: str, view: dbdwrapper.DbdVersionedV
                 # as the canary value for this, but at least one uses -2)
                 if "int" in analysis.seen_types:
                     assert analysis.val_min is not None
-                    if analysis.num_negative == 1 and analysis.val_min >= -2:
+                    if analysis.num_neg_vals == 1 and analysis.val_min >= -2:
                         analysis.tags.remove("NOT_NULL")
                         analysis.tags.add("NEG_IS_NULL")
                         analysis.tags.add("UNSIGNED")
 
             analysis.issues = compare_data(
-                tablename, colname, analysis, view[tablename][colname], fkcols)
-            table_analysis[colname] = analysis
+                tablename, b_colname, analysis, view[tablename][b_colname], fkcols)
+            # table_analysis[a_colname] = analysis
 
-        print_analysis(tablename, colname, analysis, fkstr)
+        print_analysis(tablename, a_colname, analysis, fkstr)
         # line = f"{tablename},{colname},{analysis.num_rows},{analysis.num_int},{analysis.num_float},{analysis.num_str},{analysis.num_null},{analysis.num_dupe},{analysis.num_zero},{analysis.num_negative},{analysis.val_min},{analysis.val_max},{analysis.need_bits},{analysis.len_min},{analysis.len_max},{' '.join(analysis.tags)},{fkstr},{' '.join(analysis.issues)}"
         # print(line.replace("None", ""))
 
@@ -371,7 +457,18 @@ else:
     UserDict_AnalysisData = UserDict
 
 class AnalysisData(UserDict_AnalysisData):
-    pass
+
+    def for_column(self, colid: DbdColumnId) -> Optional[DbdColumnAnalysis]:
+        a_colname = analysis_colname(colid.column)
+        a_colid = DbdColumnId(colid.table, a_colname)
+        a_colid_arr = DbdColumnId(colid.table, a_colname + "[0]")
+
+        if a_colid in self:
+            return self[a_colid]
+        elif a_colid_arr in self:
+            return self[a_colid_arr]
+        else:
+            return None
 
 
 def load_analysis(filename: str) -> AnalysisData:
@@ -386,16 +483,16 @@ def load_analysis(filename: str) -> AnalysisData:
     return data
 
 
-def main():
+def main() -> int:
     # table_name = sys.argv[1]
     directory = "dbd-920dbcs41257"
 
-    dbds = dbdwrapper.load_dbd_directory_cached("../../definitions", silent=False)
-    build = dbdwrapper.BuildId.from_string("9.2.0.41257")
+    dbds = dbd.load_dbd_directory_cached("../../definitions", silent=False)
+    build = dbd.BuildId.from_string("9.2.0.41257")
     view = dbds.get_view(build)
     fkcols = view.get_fk_cols()
 
-    print("table,column,num_rows,num_int,num_float,num_str,num_null,num_dupe,num_zero,num_negative,val_min,val_max,need_bits,len_min,len_max,tags,FK,issues")
+    print("table,column,num_rows,num_int,num_float,num_str,num_null,num_dupe,num_zero,num_negative,num_neg_vals,val_min,val_max,need_bits,len_min,len_max,tags,FK,issues")
 
     # for file in sorted(os.listdir(directory)):
     for tablename in sorted(view.keys()):
@@ -419,6 +516,8 @@ def main():
         # print(f"  rows with zero values: {info['num_zero']}")
         # print(f"  rows with negative values: {info['num_negative']}")
         # print(f"  row min/max: {info['val_min']}/{info['val_max']}")
+
+    return 0
 
 
 if __name__ == "__main__":
