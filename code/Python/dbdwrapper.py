@@ -1,19 +1,33 @@
 #!/usr/bin/env python3
 # simplify the results of parsing a dbd w/ the dbd parser library
 import dataclasses
-import pickle
+import hashlib
 import os
+import pickle
 import re
 import sys
 from collections import UserDict, UserList, defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
-                    TypeVar, Union, DefaultDict)
+from pathlib import Path
+from typing import (TYPE_CHECKING, Any, DefaultDict, Dict, List, Optional, Set,
+                    Tuple, Type, TypeVar, Union)
+
 import dbd
 from ppretty import ppretty
 
 BuildIdOrTuple = Union['BuildId', Tuple[int, int, int, int]]
 DbdBuildOrRange = Union[dbd.build_version, Tuple[dbd.build_version, dbd.build_version]]
+
+def get_file_hash(file: Union[str, Path]) -> str:
+    file = Path(file)
+    with file.open("rb") as f:
+        h = hashlib.md5()
+        chunk = f.read(8192)
+        while chunk:
+            h.update(chunk)
+            chunk = f.read(8192)
+
+    return h.hexdigest()
 
 
 # identifier for a specific column in a specific table

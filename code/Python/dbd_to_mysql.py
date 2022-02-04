@@ -247,8 +247,8 @@ int_sizemap = {
 #     True: " UNSIGNED",
 # }
 
-def coltype_one(dbname: str, tablename: str, colname: str, column: dbd.DbdVersionedCol,
-                analysis: AnalysisData) -> Tuple[str, str, Optional[str]]:
+def coltype_one(args: argparse.Namespace, dbname: str, tablename: str, colname: str,
+                column: dbd.DbdVersionedCol, analysis: AnalysisData) -> Tuple[str, str, Optional[str]]:
     # string to write the column definition into
     defstr: Optional[str] = None
 
@@ -272,9 +272,9 @@ def coltype_one(dbname: str, tablename: str, colname: str, column: dbd.DbdVersio
     sql_comment_string = ""
     if annotations or comments:
         if annotations and comments:  # this feels sloppy
-            sql_comment_string = f" COMMENT '{comments} {annotations}'"
+            sql_comment_string = f" /*! COMMENT '{comments} {annotations}' */"
         else:
-            sql_comment_string = f" COMMENT '{comments}{annotations}'"
+            sql_comment_string = f" /*! COMMENT '{comments}{annotations}' */"
 
     a_column = analysis.for_column(DbdColumnId(tablename, colname))
     if a_column is None:
@@ -309,9 +309,11 @@ def coltype_one(dbname: str, tablename: str, colname: str, column: dbd.DbdVersio
 
     # The index def (which may or may not be used)
     if column.definition.type == "int" or column.definition.type == "float":
-        index_return = f"  INDEX `{colname}_idx` (`{colname}`)"
-    else:  # string
-        index_return = f"  FULLTEXT `{colname}_idx` (`{colname}`)"
+        index_return = f"CREATE INDEX `{tablename}_{colname}_idx` ON `{tablename}` (`{colname}`);"
+    elif not args.no_fulltext:  # string
+        index_return = f"CREATE /*! FULLTEXT */ INDEX `{tablename}_{colname}_idx` ON `{tablename}` (`{colname}`);"
+    else:
+        index_return = f"CREATE INDEX `{tablename}_{colname}_idx` ON `{tablename}` (`{colname}` /*! (64) */);"
 
     # make our FK string, if there's a FK.
     #
@@ -321,13 +323,14 @@ def coltype_one(dbname: str, tablename: str, colname: str, column: dbd.DbdVersio
     fk_return = None
     if column.definition.fk:
         fk = column.definition.fk
-        fk_return = f"  ADD CONSTRAINT `{tablename}_{colname}` FOREIGN KEY (`{colname}`) REFERENCES `{dbname}`.`{fk.table}` (`{fk.column}`)"
+        # fk_return = f"  ADD CONSTRAINT `{tablename}_{colname}` FOREIGN KEY (`{colname}`) REFERENCES `{dbname}`.`{fk.table}` (`{fk.column}`)"
+        fk_return = f"  ADD CONSTRAINT `{tablename}_{colname}` FOREIGN KEY (`{colname}`) REFERENCES `{fk.table}` (`{fk.column}`)"
 
     return (column_return, index_return, fk_return)
 
 
-def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol,
-                    analysis: AnalysisData) -> Tuple[List[str], List[str], List[str]]:
+def coltype_strings(args: argparse.Namespace, dbname: str, tablename: str,
+                    column: dbd.DbdVersionedCol, analysis: AnalysisData) -> Tuple[List[str], List[str], List[str]]:
     """
     Generate the type string for a given column, based on DBD data
 
@@ -342,7 +345,8 @@ def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol,
 
     if column.array_size is None or column.array_size == 1:
         # single-element arrays are just a single column
-        defstr, idxstr, fkstr = coltype_one(dbname, tablename, column.name, column, analysis)
+        defstr, idxstr, fkstr = coltype_one(
+            args, dbname, tablename, column.name, column, analysis)
         return [defstr], [idxstr], [fkstr] if fkstr is not None else []
 
     # else
@@ -351,7 +355,7 @@ def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol,
     fkarr = []
     for i in range(column.array_size):
         defstr, idxstr, fkstr = coltype_one(
-            dbname, tablename, f"{column.name}[{i}]", column, analysis)
+            args, dbname, tablename, f"{column.name}[{i}]", column, analysis)
         defarr.append(defstr)
         idxarr.append(idxstr)
         if fkstr is not None:
@@ -360,9 +364,9 @@ def coltype_strings(dbname: str, tablename: str, column: dbd.DbdVersionedCol,
     return defarr, idxarr, fkarr
 
 
-def dumpdbd(dbname: str, tablename: str, all_data: dbd.DbdVersionedView,
-            table_data: dbd.DbdVersionedCols, fkcols: FKReferents,
-            analysis: AnalysisData) -> List[str]:
+def dumpdbd(args: argparse.Namespace, dbname: str, tablename: str,
+            all_data: dbd.DbdVersionedView, table_data: dbd.DbdVersionedCols,
+            fkcols: FKReferents, analysis: AnalysisData) -> List[str]:
     """
     Take the parsed data, the build-specific view, and a list of foreign keys,
     and generate a bunch of MySQL `CREATE TABLE` statements. Returns a list of
@@ -397,7 +401,7 @@ def dumpdbd(dbname: str, tablename: str, all_data: dbd.DbdVersionedView,
         referent_col = DbdColumnId(tablename, column.name)
 
         col_create, col_index, col_fk = coltype_strings(
-            dbname, tablename, column, analysis)
+            args, dbname, tablename, column, analysis)
 
         # is this column our id column?
         if "id" in column.annotation:
@@ -444,7 +448,8 @@ def dumpdbd(dbname: str, tablename: str, all_data: dbd.DbdVersionedView,
                     index_lines.extend(col_index)
             else:
                 # deferred.append("-- normal FK")
-                deferred.extend(col_fk)
+                if not args.no_fks:
+                    deferred.extend(col_fk)
 
 
     # Occasional things might not have a PK annotated, so make sure we still
@@ -456,13 +461,17 @@ def dumpdbd(dbname: str, tablename: str, all_data: dbd.DbdVersionedView,
         create_lines.append(f"  PRIMARY KEY({id_col})")
 
     # Add in any index creation we had stored for now
-    create_lines.extend(index_lines)
+    # create_lines.extend(index_lines)
 
     # Generate the actual `CREATE` statement
     # FIXME: include comment w/ layout hash(s), git source info, and file comments
-    print(f"\nCREATE TABLE IF NOT EXISTS `{dbname}`.`{tablename}` (")
+    print(f"\nCREATE TABLE /*! IF NOT EXISTS */ `{tablename}` (")
+    # print(f"\nCREATE TABLE IF NOT EXISTS `{dbname}`.`{tablename}` (")
     print(",\n".join(create_lines))
-    print(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;")
+    print(") /*! ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci */;")
+
+    if len(index_lines) > 0:
+        print("\n".join(index_lines))
 
     return deferred
 
@@ -521,6 +530,12 @@ def main() -> int:
     parser.add_argument(
         "--no-git", dest="no_git", action='store_true', default=False,
         help="don't include git revision in metadata")
+    parser.add_argument(
+        "--no-fulltext", dest="no_fulltext", action='store_true', default=False,
+        help="don't create fulltext indexes for string columns")
+    parser.add_argument(
+        "--no-fks", "--no-foreign-keys", dest="no_fks", action='store_true', default=False,
+        help="don't create foreign key constraints")
 
     # --only is disabled for now, since using it will cause FKs to be wrong
     # if it's used to try to generate an updated schema w/o parsing everything
@@ -552,12 +567,13 @@ def main() -> int:
         return 1
 
     metasql = (
-        f"\nCREATE TABLE IF NOT EXISTS `{args.dbname}`.`_dbdmeta` (\n"
+        # f"\nCREATE TABLE IF NOT EXISTS `{args.dbname}`.`_dbdmeta` (\n"
+        "\nCREATE TABLE /*! IF NOT EXISTS */ `_dbdmeta` (\n"
         "  `rev` VARCHAR(10),\n"
         "  `dirty` TINYINT UNSIGNED,\n"
         "  `build` VARCHAR(16) NOT NULL,\n"
         "  `schemadate` DATETIME NOT NULL\n"
-        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;\n"
+        ") /*! ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci */;\n"
         "\n"
     )
 
@@ -565,7 +581,8 @@ def main() -> int:
 
     if rev is not None:
         metasql += (
-            f"INSERT INTO `{args.dbname}`.`_dbdmeta` (`rev`, `dirty`, `build`, `schemadate`)\n"
+            # f"INSERT INTO `{args.dbname}`.`_dbdmeta` (`rev`, `dirty`, `build`, `schemadate`)\n"
+            f"INSERT INTO `_dbdmeta` (`rev`, `dirty`, `build`, `schemadate`)\n"
             f"  VALUES ('{rev}', {1 if isdirty else 0}, '{build}', '{now}');\n\n"
         )
     else:
@@ -576,19 +593,22 @@ def main() -> int:
 
     # No in-place updates -- just drop and recreate the entire database
     # FIXME: add some metadata
-    print(f"DROP DATABASE IF EXISTS {args.dbname};")
-    print(f"CREATE DATABASE {args.dbname};")
+    print("-- these will error on sqlite, but otherwise fine")
+    print(f"DROP DATABASE IF EXISTS `{args.dbname}`;")
+    print(f"CREATE DATABASE `{args.dbname}`;")
+    print(f"USE `{args.dbname}`;")
     print(metasql)
 
     # deferred statements to add to `ALTER` at the end
     deferred = {}
 
     for table, data in sorted(view.items()):
-        deferred[table] = dumpdbd(args.dbname, table, view, data, fkcols, analysis)
+        deferred[table] = dumpdbd(args, args.dbname, table, view, data, fkcols, analysis)
 
     for table, lines in deferred.items():
         if len(lines) > 0:
-            print(f"\nALTER TABLE `{args.dbname}`.`{table}`")
+            # print(f"\nALTER TABLE `{args.dbname}`.`{table}`")
+            print(f"\nALTER TABLE `{table}`")
             print(",\n".join(lines))
             print(";")
 
