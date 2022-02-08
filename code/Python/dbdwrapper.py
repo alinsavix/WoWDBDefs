@@ -5,11 +5,12 @@ import hashlib
 import os
 import pickle
 import re
+import subprocess
 import sys
 from collections import UserDict, UserList, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import (TYPE_CHECKING, Any, DefaultDict, Dict, List, Optional, Set,
+from typing import (Any, DefaultDict, Dict, List, Optional, Set,
                     Tuple, Type, TypeVar, Union)
 
 import dbd
@@ -28,6 +29,39 @@ def get_file_hash(file: Union[str, Path]) -> str:
             chunk = f.read(8192)
 
     return h.hexdigest()
+
+
+#  returns:   commit,hash, List[dirty], List[untracked]
+def get_git_revision(defs_dir: Union[str, Path]) -> Tuple[str, List[str], List[str]]:
+    """Get the current git version and a list of dirty and unknown tables, for metadata"""
+    defs_dir = Path(defs_dir)
+    if not defs_dir.exists() or not defs_dir.is_dir():
+        raise ValueError(f"Invalid defs_dir: {defs_dir}")
+
+    try:
+        revstr = subprocess.check_output(
+            ["git", "rev-parse", "--short=10", "HEAD"], cwd=defs_dir)
+        rev = revstr.strip().decode("utf-8")
+
+        dirty = []
+        unknown = []
+
+        dirtystr = subprocess.check_output(
+            ["git", "status", "--untracked-files=no", "--porcelain"], cwd=defs_dir)
+
+        for line in dirtystr.strip().decode("utf-8").split('\n'):
+            if not line.endswith(".dbd"):
+                continue
+
+            if line[1] == "?":
+                unknown.append(line[3:])
+            elif line[1] == "M":
+                dirty.append(line[3:])
+
+        return rev, dirty, unknown
+
+    except Exception as e:
+        return None, [], []
 
 
 # identifier for a specific column in a specific table
@@ -170,16 +204,7 @@ class BuildIdRange:
         return r
 
 
-# The TYPE_CHECKING ugliness (here and elsewhere) allow type hinting for these
-# UserDict entries (when using newer versions of python), while still allowing
-# the code to execute at all on older versions of python. Subscriptable UserDict
-# requires python 3.9 or newer.
-if TYPE_CHECKING:
-    UserDict_DbdBuilds = UserDict['BuildIdRange', 'DbdVersionedCols']
-else:
-    UserDict_DbdBuilds = UserDict
-
-class DbdBuilds(UserDict_DbdBuilds):
+class DbdBuilds(UserDict['BuildIdRange', 'DbdVersionedCols']):
     """
     A dict of build-specific DBD data, indexed by BuildId/BuildIdRange
     values. Do a lookup using a BuildId to find a build range into which
@@ -267,12 +292,7 @@ class DbdColumnDef:
         )
 
 
-if TYPE_CHECKING:
-    UserDict_DbdColumnDefs = UserDict[str, DbdColumnDef]
-else:
-    UserDict_DbdColumnDefs = UserDict
-
-class DbdColumnDefs(UserDict_DbdColumnDefs):
+class DbdColumnDefs(UserDict[str, DbdColumnDef]):
     """
     Data class holding an entire set of global column definitions (i.e. a
     table), indexed by column name.
@@ -314,12 +334,7 @@ class DbdVersionedCol:
         )
 
 
-if TYPE_CHECKING:
-    UserDict_DbdVersionedCols = UserDict[str, DbdVersionedCol]
-else:
-    UserDict_DbdVersionedCols = UserDict
-
-class DbdVersionedCols(UserDict_DbdVersionedCols):
+class DbdVersionedCols(UserDict[str, DbdVersionedCol]):
     """
     Data class holding an entire set of versioned (build-specific) column
     definitions (i.e. a table), indexed by column name.
@@ -336,12 +351,8 @@ class DbdVersionedCols(UserDict_DbdVersionedCols):
 FKReferers = Dict[DbdColumnId, DbdVersionedCol]
 FKReferents = Dict[DbdColumnId, FKReferers]
 
-if TYPE_CHECKING:
-    UserDict_DbdVersionedView = UserDict[str, 'DbdVersionedCols']
-else:
-    UserDict_DbdVersionedView = UserDict
 
-class DbdVersionedView(UserDict_DbdVersionedView):
+class DbdVersionedView(UserDict[str, 'DbdVersionedCols']):
     def get_fk_cols(self) -> FKReferents:
         """
         Look through all of a view's tables and find columns that are used as
@@ -396,12 +407,22 @@ class DbdFileData:
         )
 
 
-if TYPE_CHECKING:
-    UserDict_DbdDirectory = UserDict[str, DbdFileData]
-else:
-    UserDict_DbdDirectory = UserDict
+@dataclass
+class DbdTableMeta:
+    hash: str
+    is_dirty: bool
+    is_untracked: bool
 
-class DbdDirectory(UserDict_DbdDirectory):
+
+@dataclass
+class DbdMeta:
+    rev: Optional[str]
+    is_dirty: bool
+    build: BuildId
+    parsetime: int  # FIXME: what's the right type for this?
+
+
+class DbdDirectory(UserDict[str, DbdFileData]):
     """
     Data class holding the parsed data for an entire directory full of dbd
     files (most commonly "all the dbd files") for all builds, indexed by

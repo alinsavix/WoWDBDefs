@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-
+# requires python >= 3.9 (...sorry)
+"""
+dbdanalyze: make an analysis of the contents of a WoW db2 database dump
+(provided by the user in csv format) and make some inferences about the
+data found therein, intended to make properly wrangling that data in
+various types of database easier.
+"""
+import argparse
 import csv
 import dataclasses
 import os
@@ -7,7 +14,7 @@ import sys
 import re
 from collections import UserDict
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import inspect
 
 import dbdwrapper as dbd
@@ -150,12 +157,7 @@ class DbdColumnAnalysis:
         )
 
 
-if TYPE_CHECKING:
-    UserDict_DbdTableAnalysis = UserDict[str, DbdColumnAnalysis]
-else:
-    UserDict_DbdTableAnalysis = UserDict
-
-class DbdTableAnalysis(UserDict_DbdTableAnalysis):
+class DbdTableAnalysis(UserDict[str, DbdColumnAnalysis]):
     pass
 
 
@@ -451,13 +453,7 @@ def analyze_table(directory: str, tablename: str, view: dbd.DbdVersionedView,
     print()
 
 
-if TYPE_CHECKING:
-    UserDict_AnalysisData = UserDict[DbdColumnId, DbdColumnAnalysis]
-else:
-    UserDict_AnalysisData = UserDict
-
-class AnalysisData(UserDict_AnalysisData):
-
+class AnalysisData(UserDict[DbdColumnId, DbdColumnAnalysis]):
     def for_column(self, colid: DbdColumnId) -> Optional[DbdColumnAnalysis]:
         a_colname = analysis_colname(colid.column)
         a_colid = DbdColumnId(colid.table, a_colname)
@@ -483,12 +479,34 @@ def load_analysis(filename: str) -> AnalysisData:
     return data
 
 
+def build_string_regex(arg_value, pat=re.compile(r"^\d+\.\d+\.\d+\.\d+$")) -> str:
+    if not pat.match(arg_value):
+        raise argparse.ArgumentTypeError("invalid build string (try e.g. '9.1.5.41488')")
+
+    return arg_value
+
 def main() -> int:
-    # table_name = sys.argv[1]
-    directory = "dbd-920dbcs41257"
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--definitions", "--defs", dest="definitions", type=str, action='store',
+        default="../../definitions", help="location of .dbd files")
+    # parser.add_argument(
+    #     "--analysis", dest="analysis_file", type=str, action='store',
+    #     default="analysis.csv", help="extra column analysis data")
+    parser.add_argument(
+        "--datadir", dest="datadir", type=str, action='store', default=None,
+        help="location of DBD data .csv files")
+    parser.add_argument(
+        "--build", dest="build", type=build_string_regex, default="9.2.0.41257",
+        help="full build number to use for parsing")
+
+    args = parser.parse_args()
+    build = dbd.BuildId.from_string(args.build)
+
+    if args.datadir is None:
+        args.datadir = f"dbd-{build.major}{build.minor}{build.patch}dbcs{build.build}"
 
     dbds = dbd.load_dbd_directory_cached("../../definitions", silent=False)
-    build = dbd.BuildId.from_string("9.2.0.41257")
     view = dbds.get_view(build)
     fkcols = view.get_fk_cols()
 
@@ -496,7 +514,7 @@ def main() -> int:
 
     # for file in sorted(os.listdir(directory)):
     for tablename in sorted(view.keys()):
-        analyze_table(directory, tablename, view, fkcols)
+        analyze_table(args.datadir, tablename, view, fkcols)
         # filename = os.fsdecode(file)
         # if filename.endswith(".csv"):
         #     tablename = filename.replace(".csv", "")

@@ -568,7 +568,7 @@ def main() -> int:
 
     metasql = (
         # f"\nCREATE TABLE IF NOT EXISTS `{args.dbname}`.`_dbdmeta` (\n"
-        "\nCREATE TABLE /*! IF NOT EXISTS */ `_dbdmeta` (\n"
+        "\nCREATE TABLE IF NOT EXISTS `_dbdmeta` (\n"
         "  `rev` VARCHAR(10),\n"
         "  `dirty` TINYINT UNSIGNED,\n"
         "  `build` VARCHAR(16) NOT NULL,\n"
@@ -582,14 +582,33 @@ def main() -> int:
     if rev is not None:
         metasql += (
             # f"INSERT INTO `{args.dbname}`.`_dbdmeta` (`rev`, `dirty`, `build`, `schemadate`)\n"
-            f"INSERT INTO `_dbdmeta` (`rev`, `dirty`, `build`, `schemadate`)\n"
+            f"INSERT INTO `_dbd_meta` (`rev`, `dirty`, `build`, `schemadate`)\n"
             f"  VALUES ('{rev}', {1 if isdirty else 0}, '{build}', '{now}');\n\n"
         )
     else:
         metasql += (
-            "INSERT INTO `_dbdmeta` (`rev`, `dirty`, `build`, `schemadate`)\n"
+            "INSERT INTO `_dbd_meta` (`rev`, `dirty`, `build`, `schemadate`)\n"
             f"  VALUES (NULL, NULL, '{build}', '{now}');\n\n"
         )
+
+    metasql += (
+        "\nCREATE TABLE IF NOT EXISTS `_dbd_table_meta` (\n"
+        "  `table` VARCHAR(64) NOT NULL,\n"
+        "  `dirty` TINYINT UNSIGNED NOT NULL,\n"
+        "  `hash` CHAR(32) NOT NULL,\n"
+        ") /*! ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci */;\n"
+        "\n"
+    )
+
+    metasql += (
+        "\nCREATE TABLE IF NOT EXISTS `_dbd_data_meta` (\n"
+        "  `table` VARCHAR(64) NOT NULL,\n"
+        "  `hash` CHAR(32) NOT NULL,\n"
+        "  `path` VARCHAR(256) NOT NULL,\n"
+        ") /*! ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci */;\n"
+        "\n"
+    )
+
 
     # No in-place updates -- just drop and recreate the entire database
     # FIXME: add some metadata

@@ -1,0 +1,10 @@
+.DS_Store
+.AppleDouble
+
+.vscode
+
+__pycache__/
+*.py[cod]
+.mypy_cache/
+
+.dbd.pickle
