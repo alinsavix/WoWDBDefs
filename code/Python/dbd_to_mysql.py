@@ -568,7 +568,7 @@ def main() -> int:
 
     metasql = (
         # f"\nCREATE TABLE IF NOT EXISTS `{args.dbname}`.`_dbdmeta` (\n"
-        "\nCREATE TABLE IF NOT EXISTS `_dbdmeta` (\n"
+        "\nCREATE TABLE IF NOT EXISTS `_dbd_meta` (\n"
         "  `rev` VARCHAR(10),\n"
         "  `dirty` TINYINT UNSIGNED,\n"
         "  `build` VARCHAR(16) NOT NULL,\n"
@@ -596,6 +596,7 @@ def main() -> int:
         "  `table` VARCHAR(64) NOT NULL,\n"
         "  `dirty` TINYINT UNSIGNED NOT NULL,\n"
         "  `hash` CHAR(32) NOT NULL,\n"
+        "  PRIMARY KEY(`table`)\n"
         ") /*! ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci */;\n"
         "\n"
     )
@@ -603,8 +604,9 @@ def main() -> int:
     metasql += (
         "\nCREATE TABLE IF NOT EXISTS `_dbd_data_meta` (\n"
         "  `table` VARCHAR(64) NOT NULL,\n"
-        "  `hash` CHAR(32) NOT NULL,\n"
         "  `path` VARCHAR(256) NOT NULL,\n"
+        "  `hash` CHAR(32) NOT NULL,\n"
+        "  PRIMARY KEY(`table`)\n"
         ") /*! ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci */;\n"
         "\n"
     )

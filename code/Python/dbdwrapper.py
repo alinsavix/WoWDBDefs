@@ -32,7 +32,7 @@ def get_file_hash(file: Union[str, Path]) -> str:
 
 
 #  returns:   commit,hash, List[dirty], List[untracked]
-def get_git_revision(defs_dir: Union[str, Path]) -> Tuple[str, List[str], List[str]]:
+def get_git_revision(defs_dir: Union[str, Path]) -> Tuple[Optional[str], Set[str], Set[str]]:
     """Get the current git version and a list of dirty and unknown tables, for metadata"""
     defs_dir = Path(defs_dir)
     if not defs_dir.exists() or not defs_dir.is_dir():
@@ -40,23 +40,24 @@ def get_git_revision(defs_dir: Union[str, Path]) -> Tuple[str, List[str], List[s
 
     try:
         revstr = subprocess.check_output(
-            ["git", "rev-parse", "--short=10", "HEAD"], cwd=defs_dir)
+            ["git", "rev-parse", "HEAD"], cwd=defs_dir)
         rev = revstr.strip().decode("utf-8")
 
-        dirty = []
-        unknown = []
+        dirty: Set[str] = set()
+        unknown: Set[str] = set()
 
         dirtystr = subprocess.check_output(
-            ["git", "status", "--untracked-files=no", "--porcelain"], cwd=defs_dir)
+            ["git", "status", "--porcelain"], cwd=defs_dir)
 
         for line in dirtystr.strip().decode("utf-8").split('\n'):
             if not line.endswith(".dbd"):
                 continue
 
+            table = Path(line[3:]).stem
             if line[1] == "?":
-                unknown.append(line[3:])
+                unknown.add(table)
             elif line[1] == "M":
-                dirty.append(line[3:])
+                dirty.add(table)
 
         return rev, dirty, unknown
 
@@ -469,7 +470,7 @@ def load_dbd_file(filename: str) -> 'DbdFileData':
     return DbdFileData.from_dbd(dbf)
 
 
-def load_dbd_directory(path: str) -> DbdDirectory:
+def load_dbd_directory(path: str, verbose: bool = False) -> DbdDirectory:
     """
     Parse an entire directory of DBD files using the DBD parser, and return
     the resulting data in a useful form.
@@ -481,15 +482,20 @@ def load_dbd_directory(path: str) -> DbdDirectory:
     """
     dbds = DbdDirectory()
 
-    for file in os.listdir(path):
+    for file in sorted(os.listdir(path)):
         if file.endswith(".dbd"):
-            dbds[file[:-len(".dbd")]] = load_dbd_file(os.path.join(path, file))
+            table = file[:-len(".dbd")]
+
+            if verbose:
+                print(f"Parsing {table}...")
+
+            dbds[table] = load_dbd_file(os.path.join(path, file))
 
     return dbds
 
 
 def load_dbd_directory_cached(path: str, skip_cache: bool = False,
-                              refresh_cache: bool = False, silent: bool = False) -> 'DbdDirectory':
+                              refresh_cache: bool = False, silent: bool = False, verbose: bool = False) -> 'DbdDirectory':
     """
     Load a directory of DBD files, and cache the result in a file. The cache file
     is placed in the DBD directory under the name ".dbd.pickle". If the cache is
@@ -536,7 +542,7 @@ def load_dbd_directory_cached(path: str, skip_cache: bool = False,
         optional_print(
             "NOTICE: No (valid) DBD definition cache available, directly parsing dbd definitions")
 
-        dbds = load_dbd_directory(path)
+        dbds = load_dbd_directory(path, verbose=verbose)
         if not skip_cache:
             with open(pickle_path, "wb") as f:
                 pickle.dump(dbds, f)
@@ -564,10 +570,12 @@ if __name__ == "__main__":
     # dbf = dbd.parse_dbd_file("../../defs.mini/Spell.dbd")
     # f = DbdFileData.from_dbd(dbf)
     # f = parse_dbd_file("../../defs.mini/Spell.dbd")
-    d = dbd.parse_dbd_directory("../../defs.mini")
-    b = BuildId(3, 1, 2, 9768)
+    # d = dbd.parse_dbd_directory("../../defs.mini")
+    # b = BuildId(3, 1, 2, 9768)
 
-    v = d.get_view(b)
-    print(ppretty(v))
+    # v = d.get_view(b)
+    # print(ppretty(v))
 
+    print(get_git_revision("../../definitions"))
+    print(get_file_hash("../../definitions/Spell.dbd"))
     sys.exit(0)

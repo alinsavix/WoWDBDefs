@@ -466,6 +466,12 @@ class AnalysisData(UserDict[DbdColumnId, DbdColumnAnalysis]):
         else:
             return None
 
+    def get_columns(self, table: str) -> Set[str]:
+        return {k.column for k in self.keys() if k.table == table}
+
+    def tablenames(self) -> Set[str]:
+        return {colid.table for colid in self.keys()}
+
 
 def load_analysis(filename: str) -> AnalysisData:
     data = AnalysisData()
