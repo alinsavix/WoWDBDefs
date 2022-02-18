@@ -12,12 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import (Any, DefaultDict, Dict, List, Optional, Set,
                     Tuple, Type, TypeVar, Union)
+import time
 
 import dbd
 from ppretty import ppretty
 
 BuildIdOrTuple = Union['BuildId', Tuple[int, int, int, int]]
 DbdBuildOrRange = Union[dbd.build_version, Tuple[dbd.build_version, dbd.build_version]]
+
 
 def get_file_hash(file: Union[str, Path]) -> str:
     file = Path(file)
@@ -31,7 +33,7 @@ def get_file_hash(file: Union[str, Path]) -> str:
     return h.hexdigest()
 
 
-#  returns:   commit,hash, List[dirty], List[untracked]
+#  returns:   commithash, Set[dirty], Set[untracked]
 def get_git_revision(defs_dir: Union[str, Path]) -> Tuple[Optional[str], Set[str], Set[str]]:
     """Get the current git version and a list of dirty and unknown tables, for metadata"""
     defs_dir = Path(defs_dir)
@@ -62,7 +64,7 @@ def get_git_revision(defs_dir: Union[str, Path]) -> Tuple[Optional[str], Set[str
         return rev, dirty, unknown
 
     except Exception as e:
-        return None, [], []
+        return None, set(), set()
 
 
 # identifier for a specific column in a specific table
@@ -389,25 +391,6 @@ class DbdVersionedView(UserDict[str, 'DbdVersionedCols']):
         return fkreferents
 
 
-@dataclass(init=True, repr=True)
-class DbdFileData:
-    """
-    Data class holding all of the parsed data from a single dbd file, for all
-    build versions, plus the global definitions. This maps fairly directly
-    to the top level data structure created by the dbd parser itself.
-    """
-    columns: 'DbdColumnDefs'
-    definitions: 'DbdBuilds'
-
-    @classmethod
-    def from_dbd(cls, src: dbd.dbd_file):
-        definitions = DbdColumnDefs.from_dbd(src.columns)
-        return cls(
-            columns=definitions,
-            definitions=DbdBuilds.from_dbd(src.definitions, definitions)
-        )
-
-
 @dataclass
 class DbdTableMeta:
     hash: str
@@ -419,8 +402,27 @@ class DbdTableMeta:
 class DbdMeta:
     rev: Optional[str]
     is_dirty: bool
-    build: BuildId
     parsetime: int  # FIXME: what's the right type for this?
+
+
+@dataclass(init=True, repr=True)
+class DbdFileData:
+    """
+    Data class holding all of the parsed data from a single dbd file, for all
+    build versions, plus the global definitions. This maps fairly directly
+    to the top level data structure created by the dbd parser itself.
+    """
+    columns: 'DbdColumnDefs'
+    definitions: 'DbdBuilds'
+    meta: Optional['DbdTableMeta'] = None
+
+    @classmethod
+    def from_dbd(cls, src: dbd.dbd_file):
+        definitions = DbdColumnDefs.from_dbd(src.columns)
+        return cls(
+            columns=definitions,
+            definitions=DbdBuilds.from_dbd(src.definitions, definitions)
+        )
 
 
 class DbdDirectory(UserDict[str, DbdFileData]):
@@ -429,6 +431,8 @@ class DbdDirectory(UserDict[str, DbdFileData]):
     files (most commonly "all the dbd files") for all builds, indexed by
     table name.
     """
+    meta: DbdMeta
+
     def get_view(self, build: BuildIdOrTuple) -> DbdVersionedView:
         """
         Get a single view of the data for a specific BuildId. Tables and
@@ -470,6 +474,7 @@ def load_dbd_file(filename: str) -> 'DbdFileData':
     return DbdFileData.from_dbd(dbf)
 
 
+# FIXME: use pathlib
 def load_dbd_directory(path: str, verbose: bool = False) -> DbdDirectory:
     """
     Parse an entire directory of DBD files using the DBD parser, and return
@@ -482,6 +487,10 @@ def load_dbd_directory(path: str, verbose: bool = False) -> DbdDirectory:
     """
     dbds = DbdDirectory()
 
+    parsetime = int(time.time())
+    rev, dirty, untracked = get_git_revision(path)
+    dbds.meta = DbdMeta(rev, len(dirty) > 0, parsetime)
+
     for file in sorted(os.listdir(path)):
         if file.endswith(".dbd"):
             table = file[:-len(".dbd")]
@@ -489,7 +498,11 @@ def load_dbd_directory(path: str, verbose: bool = False) -> DbdDirectory:
             if verbose:
                 print(f"Parsing {table}...")
 
-            dbds[table] = load_dbd_file(os.path.join(path, file))
+            filehash = get_file_hash(os.path.join(path, file))
+            t = load_dbd_file(os.path.join(path, file))
+            t.meta = DbdTableMeta(filehash, table in dirty, table in untracked)
+
+            dbds[table] = t
 
     return dbds
 
@@ -576,6 +589,10 @@ if __name__ == "__main__":
     # v = d.get_view(b)
     # print(ppretty(v))
 
-    print(get_git_revision("../../definitions"))
-    print(get_file_hash("../../definitions/Spell.dbd"))
+    # print(get_git_revision("../../definitions"))
+    # print(get_file_hash("../../definitions/Spell.dbd"))
+    x = load_dbd_directory("../../definitions", verbose=True)
+    print(x.meta)
+    print(x['Achievement'].meta)
+
     sys.exit(0)

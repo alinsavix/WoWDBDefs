@@ -503,7 +503,7 @@ def main() -> int:
         "--datadir", dest="datadir", type=str, action='store', default=None,
         help="location of DBD data .csv files")
     parser.add_argument(
-        "--build", dest="build", type=build_string_regex, default="9.2.0.41257",
+        "--build", dest="build", type=build_string_regex, default="9.2.0.42257",
         help="full build number to use for parsing")
 
     args = parser.parse_args()

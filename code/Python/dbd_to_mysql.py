@@ -510,7 +510,7 @@ def main() -> int:
         "--analysis", dest="analysis_file", type=str, action='store',
         default="analysis.csv", help="extra column analysis data")
     parser.add_argument(
-        "--build", dest="build", type=build_string_regex, default="9.2.0.41257",
+        "--build", dest="build", type=build_string_regex, default="9.2.0.42257",
         help="full build number to use for parsing")
     parser.add_argument(
         "--dbname", dest="dbname", type=str, default="wowdbd",
@@ -554,47 +554,46 @@ def main() -> int:
 
     dbds = dbd.load_dbd_directory_cached(
         args.definitions, skip_cache=args.no_cache, refresh_cache=args.refresh_cache)
+    # print(f"meta: {dbds.meta}")
+
     build = dbd.BuildId.from_string(args.build)
     view = dbds.get_view(build)
     fkcols = view.get_fk_cols()
     analysis = load_analysis(args.analysis_file)
     fk_fixup(view, fkcols, analysis, show_fixups=args.show_fixups)
 
-    # check upfront so we can bail before we start generating output
-    rev, isdirty = get_git_revision()
-    if rev is None and not args.no_git:
-        print("ERROR: Couldn't find git revision, run with --no-git to disable", file=sys.stderr)
-        return 1
-
+    # print(f"keys: {dbds.keys()}")
+    # print(ppretty(dbds))
+    # sys.exit(0)
     metasql = (
-        # f"\nCREATE TABLE IF NOT EXISTS `{args.dbname}`.`_dbdmeta` (\n"
         "\nCREATE TABLE IF NOT EXISTS `_dbd_meta` (\n"
-        "  `rev` VARCHAR(10),\n"
+        "  `rev` CHAR(40),\n"
         "  `dirty` TINYINT UNSIGNED,\n"
         "  `build` VARCHAR(16) NOT NULL,\n"
-        "  `schemadate` DATETIME NOT NULL\n"
+        "  `parsedate` DATETIME\n"
         ") /*! ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci */;\n"
         "\n"
     )
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if dbds.meta.rev is None:
+        print("WARNING: Couldn't find git revision, full dbd metadata will be unavailable", file=sys.stderr)
 
-    if rev is not None:
+    if dbds.meta.rev is not None:
         metasql += (
-            # f"INSERT INTO `{args.dbname}`.`_dbdmeta` (`rev`, `dirty`, `build`, `schemadate`)\n"
-            f"INSERT INTO `_dbd_meta` (`rev`, `dirty`, `build`, `schemadate`)\n"
-            f"  VALUES ('{rev}', {1 if isdirty else 0}, '{build}', '{now}');\n\n"
+            f"INSERT INTO `_dbd_meta` (`rev`, `dirty`, `build`, `parsedate`)\n"
+            f"  VALUES ('{dbds.meta.rev}', {1 if dbds.meta.is_dirty else 0}, '{build}', FROM_UNIXTIME({dbds.meta.parsetime}));\n\n"
         )
     else:
         metasql += (
-            "INSERT INTO `_dbd_meta` (`rev`, `dirty`, `build`, `schemadate`)\n"
-            f"  VALUES (NULL, NULL, '{build}', '{now}');\n\n"
+            "INSERT INTO `_dbd_meta` (`rev`, `dirty`, `build`, `parsedate`)\n"
+            f"  VALUES (NULL, NULL, '{build}', NULL);\n\n"
         )
 
     metasql += (
         "\nCREATE TABLE IF NOT EXISTS `_dbd_table_meta` (\n"
         "  `table` VARCHAR(64) NOT NULL,\n"
         "  `dirty` TINYINT UNSIGNED NOT NULL,\n"
+        "  `untracked` TINYINT UNSIGNED NOT NULL,\n"
         "  `hash` CHAR(32) NOT NULL,\n"
         "  PRIMARY KEY(`table`)\n"
         ") /*! ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci */;\n"
@@ -623,8 +622,16 @@ def main() -> int:
     # deferred statements to add to `ALTER` at the end
     deferred = {}
 
-    for table, data in sorted(view.items()):
-        deferred[table] = dumpdbd(args, args.dbname, table, view, data, fkcols, analysis)
+    for tablename, data in sorted(view.items()):
+        deferred[tablename] = dumpdbd(args, args.dbname, tablename,
+                                      view, data, fkcols, analysis)
+
+        tablemeta = dbds[tablename].meta
+        assert tablemeta is not None
+        print(
+            f"INSERT INTO `_dbd_table_meta` (`table`, `dirty`, `untracked`, `hash`)\n"
+            f"  VALUES ('{tablename}', {1 if tablemeta.is_dirty else 0}, {1 if tablemeta.is_untracked else 0}, '{tablemeta.hash}');\n\n"
+        )
 
     for table, lines in deferred.items():
         if len(lines) > 0:

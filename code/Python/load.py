@@ -34,19 +34,20 @@ def get_file_hash(file: Union[str, Path]) -> str:
 def load_one(engine, file: Path, tablename: str, analysis: AnalysisData, datameta: Table) -> int:
     print(f"Loading {tablename}...", end="", flush=True)
 
-    negnullcols: Set[str] = set()
-
-    for c in analysis.get_columns(tablename):
-        cc = analysis.for_column(DbdColumnId(tablename, c))
-        if cc:
-            if "NEG_IS_NULL" in cc.tags:
-                negnullcols.add(c)
-
     time_prep_start = time.monotonic()
 
     rows = []
+    negnullcols: Set[str] = set()
     with file.open("r", newline="") as csvfile:
         reader = csv.DictReader(csvfile, dialect='excel')
+
+        assert reader.fieldnames is not None
+        for c in reader.fieldnames:
+            cc = analysis.for_column(DbdColumnId(tablename, c))
+            if cc:
+                if "NEG_IS_NULL" in cc.tags:
+                    negnullcols.add(c)
+
         for row in reader:
             rows.append({k: None if (k in negnullcols and int(v) < 0)
                          else v for k, v in row.items()})
@@ -67,6 +68,7 @@ def load_one(engine, file: Path, tablename: str, analysis: AnalysisData, datamet
         try:
             conn.execute(text("SET SESSION foreign_key_checks = 0"))
             conn.execute(text(f"TRUNCATE `{tablename}`"))
+            conn.execute(text(f"DELETE FROM _dbd_data_meta WHERE `table`='{tablename}'"))
             # conn.execute(text(f"LOCK TABLES `{tablename}` WRITE"))
             # conn.execute(text(f"ALTER TABLE `{tablename}` DISABLE KEYS"))
         except sqlalchemy.exc.InvalidRequestError as e:
@@ -107,11 +109,15 @@ def main() -> int:
         "--datadir", dest="datadir", type=Path, action='store', default=None,
         help="location of DBD data .csv files")
     parser.add_argument(
-        "--build", dest="build", type=build_string_regex, default="9.2.0.41257",
+        "--build", dest="build", type=build_string_regex, default="9.2.0.42257",
         help="full build number to use for parsing")
     parser.add_argument(
         "--connect-string", dest="connect_string", type=str, action='store',
         default="mysql+pymysql://root@localhost/wowdbd")
+    parser.add_argument(
+        "table", nargs='*', action='store',
+        help="optional list of tables to load"
+    )
 
     args = parser.parse_args()
     build = dbd.BuildId.from_string(args.build)
@@ -122,12 +128,11 @@ def main() -> int:
     analysis = load_analysis(args.analysis_file)
     engine = create_engine(args.connect_string, echo=False, future=True)
 
-
     try:
         data_meta_obj = MetaData()
         data_meta = Table("_dbd_data_meta", data_meta_obj, autoload_with=engine)
     except sqlalchemy.exc.NoSuchTableError:
-        print(f"ERROR: Table _dbd_data_meta not found", file=sys.stderr)
+        print("ERROR: Table _dbd_data_meta not found", file=sys.stderr)
         return 0
 
 
@@ -137,13 +142,18 @@ def main() -> int:
     #         table_name = filename.replace(".csv", "")
     #         load_one(engine, args.datadir, table_name, analysis)
 
-    print(f"Loading data for build {build}")
+    print(f"Loading data for build {build}...")
 
     time_start = time.monotonic()
     rows_loaded = 0
     tables_loaded = 0
 
-    for tablename in sorted(analysis.tablenames()):
+    if args.table:
+        tablelist = args.table
+    else:
+        tablelist = sorted(analysis.tablenames())
+
+    for tablename in tablelist:
         # for tablename in ["SpellVisualKitModelAttach"]:
         file = args.datadir / (tablename + ".csv")
         if file.exists():
