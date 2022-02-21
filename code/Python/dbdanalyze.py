@@ -343,13 +343,17 @@ def infer_type(analysis: DbdColumnAnalysis) -> DbdAnalysisTags:
     return tags
 
 
-def print_analysis(tablename: str, colname: str, analysis: DbdColumnAnalysis, fkstr: str) -> None:
+def print_analysis(tablename: str, colname: str, analysis: DbdColumnAnalysis) -> None:
+    fkstr = ""
+    if analysis.fk is not None:
+        fkstr = str(analysis.fk)
+
     line = f"{tablename},{colname},{analysis.num_rows},{analysis.num_int},{analysis.num_float},{analysis.num_str},{analysis.num_null},{analysis.num_dupe},{analysis.num_zero},{analysis.num_negative},{analysis.num_neg_vals},{analysis.val_min},{analysis.val_max},{analysis.need_bits},{analysis.len_min},{analysis.len_max},{' '.join(sorted(analysis.tags))},{fkstr},{' '.join(sorted(analysis.issues))}"
     print(line.replace("None", ""))
 
 
 # output some hand-crafted artisinal data for tables that don't exist locally
-def print_missing(tablename, view: dbd.DbdVersionedView) -> None:
+def print_missing(a: 'AnalysisData', tablename: str, view: dbd.DbdVersionedView) -> None:
     table = view[tablename]
     for colname, coldata in table.items():
         analysis = DbdColumnAnalysis()
@@ -372,13 +376,16 @@ def print_missing(tablename, view: dbd.DbdVersionedView) -> None:
                 assert analysis.fk is not None
                 fkstr = str(analysis.fk)
 
-        print_analysis(tablename, colname, analysis, fkstr)
+
+        # print_analysis(tablename, colname, analysis, fkstr)
+        colid = DbdColumnId(tablename, colname)
+        a[colid] = analysis
 
 
 array_re = re.compile(r"\[[x0-9]+\]$")
 
-def analyze_table(directory: str, tablename: str, view: dbd.DbdVersionedView,
-                  fkcols: dbd.FKReferents) -> None:
+def analyze_table(a: 'AnalysisData', directory: str, tablename: str,
+                  view: dbd.DbdVersionedView, fkcols: dbd.FKReferents) -> None:
     file = tablename + ".csv"
     data: Dict[str, List[str]] = {}
 
@@ -392,7 +399,7 @@ def analyze_table(directory: str, tablename: str, view: dbd.DbdVersionedView,
                     data[k].append(row[k])
     except FileNotFoundError:
         print(f"WARNING: No CSV available for {tablename}", file=sys.stderr)
-        print_missing(tablename, view)
+        print_missing(a, tablename, view)
         return
 
     table_analysis = DbdTableAnalysis()
@@ -445,12 +452,11 @@ def analyze_table(directory: str, tablename: str, view: dbd.DbdVersionedView,
                 tablename, b_colname, analysis, view[tablename][b_colname], fkcols)
             # table_analysis[a_colname] = analysis
 
-        print_analysis(tablename, a_colname, analysis, fkstr)
-        # line = f"{tablename},{colname},{analysis.num_rows},{analysis.num_int},{analysis.num_float},{analysis.num_str},{analysis.num_null},{analysis.num_dupe},{analysis.num_zero},{analysis.num_negative},{analysis.val_min},{analysis.val_max},{analysis.need_bits},{analysis.len_min},{analysis.len_max},{' '.join(analysis.tags)},{fkstr},{' '.join(analysis.issues)}"
-        # print(line.replace("None", ""))
-
+        # print_analysis(tablename, a_colname, analysis, fkstr)
+        colid = DbdColumnId(tablename, a_colname)
+        a[colid] = analysis
     # add a blank line between tables
-    print()
+    # print()
 
 
 class AnalysisData(UserDict[DbdColumnId, DbdColumnAnalysis]):
@@ -518,9 +524,19 @@ def main() -> int:
 
     print("table,column,num_rows,num_int,num_float,num_str,num_null,num_dupe,num_zero,num_negative,num_neg_vals,val_min,val_max,need_bits,len_min,len_max,tags,FK,issues")
 
-    # for file in sorted(os.listdir(directory)):
+    data = AnalysisData()
     for tablename in sorted(view.keys()):
-        analyze_table(args.datadir, tablename, view, fkcols)
+        analyze_table(data, args.datadir, tablename, view, fkcols)
+
+    prev_table = ""
+    for colid, analysis in data.items():
+        if colid.table != prev_table:
+            # blank line between tables
+            if prev_table:
+                print()
+            prev_table = colid.table
+
+        print_analysis(colid.table, colid.column, analysis)
         # filename = os.fsdecode(file)
         # if filename.endswith(".csv"):
         #     tablename = filename.replace(".csv", "")
