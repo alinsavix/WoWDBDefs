@@ -457,6 +457,9 @@ class DbdDirectory(UserDict[str, DbdFileData]):
             if build in builds:
                 view[table] = builds[build]
 
+        if len(view) == 0:
+            raise ValueError(f"No data for build {build}")
+
         return view
 
 

@@ -38,6 +38,8 @@ def load_one(engine, file: Path, tablename: str, analysis: AnalysisData, datamet
 
     rows = []
     negnullcols: Set[str] = set()
+    zeronullcols: Set[str] = set()
+
     with file.open("r", newline="") as csvfile:
         reader = csv.DictReader(csvfile, dialect='excel')
 
@@ -47,9 +49,11 @@ def load_one(engine, file: Path, tablename: str, analysis: AnalysisData, datamet
             if cc:
                 if "NEG_IS_NULL" in cc.tags:
                     negnullcols.add(c)
+                # if "ZERO_IS_NULL" in cc.tags:
+                #     zeronullcols.add(c)
 
         for row in reader:
-            rows.append({k: None if (k in negnullcols and int(v) < 0)
+            rows.append({k: None if (k in negnullcols and int(v) < 0) or (k in zeronullcols and int(v) == 0)
                          else v for k, v in row.items()})
 
     time_prep_end = time.monotonic()
@@ -109,7 +113,7 @@ def main() -> int:
         "--datadir", dest="datadir", type=Path, action='store', default=None,
         help="location of DBD data .csv files")
     parser.add_argument(
-        "--build", dest="build", type=build_string_regex, default="9.2.0.42257",
+        "--build", dest="build", type=build_string_regex, default="9.2.0.42423",
         help="full build number to use for parsing")
     parser.add_argument(
         "--connect-string", dest="connect_string", type=str, action='store',

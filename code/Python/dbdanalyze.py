@@ -12,7 +12,7 @@ import dataclasses
 import os
 import sys
 import re
-from collections import UserDict
+from collections import UserDict, Counter
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import inspect
@@ -161,6 +161,26 @@ class DbdTableAnalysis(UserDict[str, DbdColumnAnalysis]):
     pass
 
 
+class AnalysisData(UserDict[DbdColumnId, DbdColumnAnalysis]):
+    def for_column(self, colid: DbdColumnId) -> Optional[DbdColumnAnalysis]:
+        a_colname = analysis_colname(colid.column)
+        a_colid = DbdColumnId(colid.table, a_colname)
+        a_colid_arr = DbdColumnId(colid.table, a_colname + "[0]")
+
+        if a_colid in self:
+            return self[a_colid]
+        elif a_colid_arr in self:
+            return self[a_colid_arr]
+        else:
+            return None
+
+    def get_columns(self, table: str) -> Set[str]:
+        return {k.column for k in self.keys() if k.table == table}
+
+    def tablenames(self) -> Set[str]:
+        return {colid.table for colid in self.keys()}
+
+
 # We basically are going to split array columns into "first entry" and "every
 # other entry", this will return the column name to use for generating/using
 # the analysis.
@@ -219,11 +239,11 @@ def generate_stats(column: List[str]) -> DbdColumnAnalysis:
     without_nulls = [x for x in column if x]
     analysis.num_null = analysis.num_rows - len(without_nulls)
 
-    without_duplicates = set(without_nulls)
-    analysis.num_dupe = len(without_nulls) - len(without_duplicates)
+    value_counts = Counter(without_nulls)
+    analysis.num_dupe = len(without_nulls) - len(value_counts)
 
     x: Union[int, float]
-    for v in without_duplicates:
+    for v, c in value_counts.items():
         try:
             x = int(v)
             assert type(x) == int
@@ -237,14 +257,14 @@ def generate_stats(column: List[str]) -> DbdColumnAnalysis:
                 analysis.val_max = max(analysis.val_max, x)
 
             if x < 0:
-                analysis.num_negative += 1
                 analysis.num_neg_vals += 1
+                analysis.num_negative += c
 
             if x == 0:
-                analysis.num_zero += 1
+                analysis.num_zero += c
 
             analysis.seen_types.add("int")
-            analysis.num_int += 1
+            analysis.num_int += c
             continue
         except ValueError:
             pass
@@ -263,14 +283,14 @@ def generate_stats(column: List[str]) -> DbdColumnAnalysis:
                 analysis.val_max = max(analysis.val_max, x)
 
             if x < 0:
-                analysis.num_negative += 1
+                analysis.num_negative += c
                 analysis.num_neg_vals += 1
 
             if x == 0:
-                analysis.num_zero += 1
+                analysis.num_zero += c
 
             analysis.seen_types.add("float")
-            analysis.num_float += 1
+            analysis.num_float += c
             continue
         except ValueError:
             pass
@@ -286,7 +306,7 @@ def generate_stats(column: List[str]) -> DbdColumnAnalysis:
             analysis.len_max = max(analysis.len_max, len(v))
 
         analysis.seen_types.add("string")
-        analysis.num_str += 1
+        analysis.num_str += c
 
     if "int" in analysis.seen_types and "float" in analysis.seen_types:
         analysis.seen_types.remove("int")
@@ -406,12 +426,6 @@ def analyze_table(a: 'AnalysisData', directory: str, tablename: str,
 
     for colname, values in data.items():
         # Assume the info for all columns in an array'd column are the same
-        # FIXME: temporary hack to use the _last_ column (by analyzing all,
-        # and overwriting)
-        # if colname.endswith("[0]"):
-        #     colname = colname.replace("[0]", "")
-        # elif colname.endswith("]"):
-        #     continue
         a_colname = analysis_colname(colname)
 
         analysis = generate_stats(values)
@@ -458,25 +472,43 @@ def analyze_table(a: 'AnalysisData', directory: str, tablename: str,
     # add a blank line between tables
     # print()
 
+# for referer_col, referer_coldata in fkcols[referent_col].items():
+def analyze_fk_nulls(analysis: 'AnalysisData', fkcols: dbd.FKReferents):
+    for referent, referers in fkcols.items():
+        # for every referring column that contains zero values, check to see
+        # if the referent hasa zero value, and if not, mark the referer as
+        # null-if-zero
+        referent_analysis = analysis.for_column(referent)
+        if referent_analysis is None:
+            # do we need an error here?
+            continue
 
-class AnalysisData(UserDict[DbdColumnId, DbdColumnAnalysis]):
-    def for_column(self, colid: DbdColumnId) -> Optional[DbdColumnAnalysis]:
-        a_colname = analysis_colname(colid.column)
-        a_colid = DbdColumnId(colid.table, a_colname)
-        a_colid_arr = DbdColumnId(colid.table, a_colname + "[0]")
+        # if the referent isn't an int, skip the special logic
+        if "int" not in referent_analysis.seen_types:
+            continue
 
-        if a_colid in self:
-            return self[a_colid]
-        elif a_colid_arr in self:
-            return self[a_colid_arr]
-        else:
-            return None
+        # if the referent has actual zero values, referers can't be using
+        # zeros as null
+        if referent_analysis.num_zero > 0:
+            continue
 
-    def get_columns(self, table: str) -> Set[str]:
-        return {k.column for k in self.keys() if k.table == table}
+        # check to see if the referer has zeros. If not, no need to set the flag
+        for referer in referers.keys():
+            # print(f"{referent} <- {referer}", file=sys.stderr)
+            referer_analysis = analysis.for_column(referer)
+            if referer_analysis is None:
+                # do we need an error here?
+                continue
 
-    def tablenames(self) -> Set[str]:
-        return {colid.table for colid in self.keys()}
+            if referer_analysis.num_zero == 0:
+                continue
+
+            # FIXME: Can we have both NEG_IS_NULL and ZERO_IS_NULL?
+            if "NOT_NULL" in referer_analysis.tags:
+                referer_analysis.tags.remove("NOT_NULL")
+
+            print(f"zero is null for: {referer}", file=sys.stderr)
+            referer_analysis.tags.add("ZERO_IS_NULL")
 
 
 def load_analysis(filename: str) -> AnalysisData:
@@ -509,7 +541,7 @@ def main() -> int:
         "--datadir", dest="datadir", type=str, action='store', default=None,
         help="location of DBD data .csv files")
     parser.add_argument(
-        "--build", dest="build", type=build_string_regex, default="9.2.0.42257",
+        "--build", dest="build", type=build_string_regex, default="9.2.0.42423",
         help="full build number to use for parsing")
 
     args = parser.parse_args()
@@ -522,11 +554,13 @@ def main() -> int:
     view = dbds.get_view(build)
     fkcols = view.get_fk_cols()
 
-    print("table,column,num_rows,num_int,num_float,num_str,num_null,num_dupe,num_zero,num_negative,num_neg_vals,val_min,val_max,need_bits,len_min,len_max,tags,FK,issues")
-
     data = AnalysisData()
     for tablename in sorted(view.keys()):
         analyze_table(data, args.datadir, tablename, view, fkcols)
+
+    analyze_fk_nulls(data, fkcols)
+
+    print("table,column,num_rows,num_int,num_float,num_str,num_null,num_dupe,num_zero,num_negative,num_neg_vals,val_min,val_max,need_bits,len_min,len_max,tags,FK,issues")
 
     prev_table = ""
     for colid, analysis in data.items():

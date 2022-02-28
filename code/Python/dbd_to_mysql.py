@@ -510,7 +510,7 @@ def main() -> int:
         "--analysis", dest="analysis_file", type=str, action='store',
         default="analysis.csv", help="extra column analysis data")
     parser.add_argument(
-        "--build", dest="build", type=build_string_regex, default="9.2.0.42257",
+        "--build", dest="build", type=build_string_regex, default="9.2.0.42423",
         help="full build number to use for parsing")
     parser.add_argument(
         "--dbname", dest="dbname", type=str, default="wowdbd",
@@ -611,8 +611,6 @@ def main() -> int:
     )
 
 
-    # No in-place updates -- just drop and recreate the entire database
-    # FIXME: add some metadata
     print("-- these will error on sqlite, but otherwise fine")
     print(f"DROP DATABASE IF EXISTS `{args.dbname}`;")
     print(f"CREATE DATABASE `{args.dbname}`;")
