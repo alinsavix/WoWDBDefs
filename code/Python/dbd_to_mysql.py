@@ -111,7 +111,6 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
         assert column_data.int_width is not None
         refs_maxbits = column_data.int_width
 
-        # FIXME: make fewer calls to analysis_colname
         a_referent = analysis.for_column(referent_col)
         if not a_referent:
             print(
@@ -124,6 +123,10 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
             if not a_referer:
                 print(
                     f"WARNING: referer '{referer_col}' -> '{referent_col}' is not analyzed", file=sys.stderr)
+                continue
+
+            # if we're supposed to ignore this FK, ignore this FK
+            if "IGNORE_FK" in a_referer.tags:
                 continue
 
             # if referer_coldata.is_unsigned:
@@ -428,8 +431,10 @@ def dumpdbd(args: argparse.Namespace, dbname: str, tablename: str,
             did_index = True
             index_lines.extend(col_index)
 
+        analysis_data = analysis.for_column(referent_col)
+
         # If we have a FK referencing another table, set that up too
-        if column.definition.fk is not None:
+        if column.definition.fk is not None and "IGNORE_FK" not in analysis_data.tags:
             fk_table = str(column.definition.fk.table)
             fk_col = str(column.definition.fk.column)
 
@@ -561,6 +566,9 @@ def main() -> int:
     fkcols = view.get_fk_cols()
     analysis = load_analysis(args.analysis_file)
     fk_fixup(view, fkcols, analysis, show_fixups=args.show_fixups)
+
+    # if "FileData" not in view:
+    #     print("No FileData table found")
 
     # print(f"keys: {dbds.keys()}")
     # print(ppretty(dbds))

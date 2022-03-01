@@ -46,11 +46,11 @@ def load_one(engine, file: Path, tablename: str, analysis: AnalysisData, datamet
         assert reader.fieldnames is not None
         for c in reader.fieldnames:
             cc = analysis.for_column(DbdColumnId(tablename, c))
-            if cc:
+            if cc and "IGNORE_FK" not in cc.tags:
                 if "NEG_IS_NULL" in cc.tags:
                     negnullcols.add(c)
-                # if "ZERO_IS_NULL" in cc.tags:
-                #     zeronullcols.add(c)
+                if "ZERO_IS_NULL" in cc.tags:
+                    zeronullcols.add(c)
 
         for row in reader:
             rows.append({k: None if (k in negnullcols and int(v) < 0) or (k in zeronullcols and int(v) == 0)

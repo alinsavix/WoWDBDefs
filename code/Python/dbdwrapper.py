@@ -351,8 +351,8 @@ class DbdVersionedCols(UserDict[str, DbdVersionedCol]):
         return cols
 
 
-FKReferers = Dict[DbdColumnId, DbdVersionedCol]
-FKReferents = Dict[DbdColumnId, FKReferers]
+FKReferers = Dict['DbdColumnId', 'DbdVersionedCol']
+FKReferents = Dict['DbdColumnId', 'FKReferers']
 
 
 class DbdVersionedView(UserDict[str, 'DbdVersionedCols']):
@@ -510,8 +510,17 @@ def load_dbd_directory(path: str, verbose: bool = False) -> DbdDirectory:
     return dbds
 
 
-def load_dbd_directory_cached(path: str, skip_cache: bool = False,
-                              refresh_cache: bool = False, silent: bool = False, verbose: bool = False) -> 'DbdDirectory':
+def load_pickle(pickle_path: str, silent: bool) -> Any:
+    with open(pickle_path, "rb") as f:
+        try:
+            dbds = pickle.load(f)
+        except Exception as e:
+            optional_print("WARNING: failed to read DBD definition cache from disk")
+
+
+def load_dbd_directory_cached(
+        path: str, skip_cache: bool = False, refresh_cache: bool = False,
+        silent: bool = False, verbose: bool = False) -> 'DbdDirectory':
     """
     Load a directory of DBD files, and cache the result in a file. The cache file
     is placed in the DBD directory under the name ".dbd.pickle". If the cache is
@@ -548,11 +557,7 @@ def load_dbd_directory_cached(path: str, skip_cache: bool = False,
         else:
             optional_print("NOTICE: Reading cached DBD definitions from disk")
 
-            with open(pickle_path, "rb") as f:
-                try:
-                    dbds = pickle.load(f)
-                except Exception as e:
-                    optional_print("WARNING: failed to read DBD definition cache from disk")
+
 
     if dbds is None:
         optional_print(

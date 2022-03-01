@@ -21,6 +21,11 @@ import dbdwrapper as dbd
 from dbdwrapper import DbdColumnId
 from ppretty import ppretty
 
+IGNORE_FK = frozenset([
+    DbdColumnId("Achievement", "Faction"),
+    DbdColumnId("LFGDungeons", "Faction"),
+])
+
 
 class DbdAnalysisTags(Set[str]):
     def __str__(self):
@@ -309,7 +314,7 @@ def generate_stats(column: List[str]) -> DbdColumnAnalysis:
         analysis.num_str += c
 
     if "int" in analysis.seen_types and "float" in analysis.seen_types:
-        analysis.seen_types.remove("int")
+        analysis.seen_types.discard("int")
 
     if "int" in analysis.seen_types:
         assert type(analysis.val_min) == int and type(analysis.val_max) == int
@@ -427,7 +432,6 @@ def analyze_table(a: 'AnalysisData', directory: str, tablename: str,
     for colname, values in data.items():
         # Assume the info for all columns in an array'd column are the same
         a_colname = analysis_colname(colname)
-
         analysis = generate_stats(values)
 
         # print(f"{a_colname} analysis: {analysis}")
@@ -440,47 +444,49 @@ def analyze_table(a: 'AnalysisData', directory: str, tablename: str,
     # got the analysis done, now learn about it
     for a_colname, analysis in table_analysis.items():
         analysis.tags = infer_type(analysis)
-        analysis.issues = DbdAnalysisIssues("NO_DBD_INFO")
+
+        colid = DbdColumnId(tablename, a_colname)
 
         b_colname = array_re.sub("", a_colname)
-        fkstr = ""
         if tablename in view and b_colname in view[tablename]:
             if view[tablename][b_colname].definition.fk:
                 analysis.fk = view[tablename][b_colname].definition.fk
                 assert analysis.fk is not None
-                fkstr = str(analysis.fk)
 
-                # if an int column references a FK, and that column has only
-                # one distinct negative value, and that value is pretty close
-                # to zero, then treat negatives in that column as null, and
-                # make the column unsigned and nullable. (most tables use -1
-                # as the canary value for this, but at least one uses -2)
-                if "int" in analysis.seen_types:
-                    assert analysis.val_min is not None
-                    if analysis.num_neg_vals == 1 and analysis.val_min >= -2:
-                        analysis.tags.remove("NOT_NULL")
-                        analysis.tags.add("NEG_IS_NULL")
-                        analysis.tags.add("UNSIGNED")
+                if colid in IGNORE_FK:
+                    analysis.tags.add("IGNORE_FK")
+
+                else:
+                    # if an int column references a FK, and that column has only
+                    # one distinct negative value, and that value is pretty close
+                    # to zero, then treat negatives in that column as null, and
+                    # make the column unsigned and nullable. (most tables use -1
+                    # as the canary value for this, but at least one uses -2)
+                    if "int" in analysis.seen_types:
+                        assert analysis.val_min is not None
+                        if analysis.num_neg_vals == 1 and analysis.val_min >= -2:
+                            analysis.tags.discard("NOT_NULL")
+                            analysis.tags.add("NEG_IS_NULL")
+                            analysis.tags.add("UNSIGNED")
 
             analysis.issues = compare_data(
                 tablename, b_colname, analysis, view[tablename][b_colname], fkcols)
-            # table_analysis[a_colname] = analysis
+        else:
+            analysis.issues = DbdAnalysisIssues("NO_DBD_INFO")
 
-        # print_analysis(tablename, a_colname, analysis, fkstr)
-        colid = DbdColumnId(tablename, a_colname)
         a[colid] = analysis
-    # add a blank line between tables
-    # print()
 
 # for referer_col, referer_coldata in fkcols[referent_col].items():
-def analyze_fk_nulls(analysis: 'AnalysisData', fkcols: dbd.FKReferents):
-    for referent, referers in fkcols.items():
-        # for every referring column that contains zero values, check to see
-        # if the referent hasa zero value, and if not, mark the referer as
-        # null-if-zero
-        referent_analysis = analysis.for_column(referent)
+def analyze_fk_nulls(analysis: 'AnalysisData'):
+    for referer_col, referer_analysis in analysis.items():
+        if referer_analysis.fk is None:
+            continue
+
+        if "IGNORE_FK" in referer_analysis.tags:
+            continue
+
+        referent_analysis = analysis.for_column(referer_analysis.fk)
         if referent_analysis is None:
-            # do we need an error here?
             continue
 
         # if the referent isn't an int, skip the special logic
@@ -492,23 +498,15 @@ def analyze_fk_nulls(analysis: 'AnalysisData', fkcols: dbd.FKReferents):
         if referent_analysis.num_zero > 0:
             continue
 
-        # check to see if the referer has zeros. If not, no need to set the flag
-        for referer in referers.keys():
-            # print(f"{referent} <- {referer}", file=sys.stderr)
-            referer_analysis = analysis.for_column(referer)
-            if referer_analysis is None:
-                # do we need an error here?
-                continue
+        if referer_analysis.num_zero == 0:
+            continue
 
-            if referer_analysis.num_zero == 0:
-                continue
+        # FIXME: Can we have both NEG_IS_NULL and ZERO_IS_NULL?
+        if "NOT_NULL" in referer_analysis.tags:
+            referer_analysis.tags.discard("NOT_NULL")
 
-            # FIXME: Can we have both NEG_IS_NULL and ZERO_IS_NULL?
-            if "NOT_NULL" in referer_analysis.tags:
-                referer_analysis.tags.remove("NOT_NULL")
-
-            print(f"zero is null for: {referer}", file=sys.stderr)
-            referer_analysis.tags.add("ZERO_IS_NULL")
+        # print(f"zero is null for: {referer}", file=sys.stderr)
+        referer_analysis.tags.add("ZERO_IS_NULL")
 
 
 def load_analysis(filename: str) -> AnalysisData:
@@ -558,7 +556,7 @@ def main() -> int:
     for tablename in sorted(view.keys()):
         analyze_table(data, args.datadir, tablename, view, fkcols)
 
-    analyze_fk_nulls(data, fkcols)
+    analyze_fk_nulls(data)
 
     print("table,column,num_rows,num_int,num_float,num_str,num_null,num_dupe,num_zero,num_negative,num_neg_vals,val_min,val_max,need_bits,len_min,len_max,tags,FK,issues")
 
