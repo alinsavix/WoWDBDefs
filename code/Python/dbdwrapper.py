@@ -460,6 +460,12 @@ class DbdDirectory(UserDict[str, DbdFileData]):
         if len(view) == 0:
             raise ValueError(f"No data for build {build}")
 
+        # add the filedata table so we can join against it, even if it
+        # isn't formally in dbcs anymore
+        if "FileData" not in view:
+            # 6, 0, 1, 18179 is a build where FileData actually exists
+            view["FileData"] = self.data["FileData"].definitions[BuildId(6, 0, 1, 18179)]
+
         return view
 
 
@@ -510,14 +516,6 @@ def load_dbd_directory(path: str, verbose: bool = False) -> DbdDirectory:
     return dbds
 
 
-def load_pickle(pickle_path: str, silent: bool) -> Any:
-    with open(pickle_path, "rb") as f:
-        try:
-            dbds = pickle.load(f)
-        except Exception as e:
-            optional_print("WARNING: failed to read DBD definition cache from disk")
-
-
 def load_dbd_directory_cached(
         path: str, skip_cache: bool = False, refresh_cache: bool = False,
         silent: bool = False, verbose: bool = False) -> 'DbdDirectory':
@@ -557,7 +555,11 @@ def load_dbd_directory_cached(
         else:
             optional_print("NOTICE: Reading cached DBD definitions from disk")
 
-
+            with open(pickle_path, "rb") as f:
+                try:
+                    dbds = pickle.load(f)
+                except Exception as e:
+                    optional_print("WARNING: failed to read DBD definition cache from disk")
 
     if dbds is None:
         optional_print(

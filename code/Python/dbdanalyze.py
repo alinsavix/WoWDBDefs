@@ -331,8 +331,7 @@ def infer_type(analysis: DbdColumnAnalysis) -> DbdAnalysisTags:
         return tags
 
     if analysis.num_rows <= 2:
-        tags.add("INSUFFICIENT_DATA")
-        return tags
+        tags.add("MINIMAL_DATA")
 
     if len(analysis.seen_types) > 1:
         tags.add("MIXED_TYPES")
@@ -407,12 +406,50 @@ def print_missing(a: 'AnalysisData', tablename: str, view: dbd.DbdVersionedView)
         a[colid] = analysis
 
 
+# Generate some fake data for the FileData table so that it actually gets
+# created properly so that we can use it (or ignore it, if we want)
+def add_fake_filedata_analysis(a: 'AnalysisData') -> None:
+    col_analysis = DbdColumnAnalysis(
+        num_rows=1431360,
+        num_null=0, num_int=1431360, num_float=0, num_str=0,
+        num_dupe=0, num_zero=0, num_negative=0, num_neg_vals=0,
+        val_min=1, val_max=4485862, need_bits=23,
+        len_min=None, len_max=None, seen_types=set(["int"]), fk=None,
+    )
+    col_analysis.tags.update(
+        ["FAKE_TABLE", "INT", "NOT_NULL", "UNIQUE", "UNSIGNED", "NOT_ZERO"])
+    a[DbdColumnId("FileData", "ID")] = col_analysis
+
+    col_analysis = DbdColumnAnalysis(
+        num_rows=1431360,
+        num_null=0, num_int=0, num_float=0, num_str=1431360,
+        num_dupe=99, num_zero=0, num_negative=0, num_neg_vals=0,
+        val_min=None, val_max=None, need_bits=None,
+        len_min=2, len_max=80, seen_types=set(["string"]), fk=None,
+    )
+    col_analysis.tags.update(["FAKE_TABLE", "STRING", "NOT_NULL"])
+    a[DbdColumnId("FileData", "Filename")] = col_analysis
+
+    col_analysis = DbdColumnAnalysis(
+        num_rows=1431360,
+        num_null=0, num_int=0, num_float=0, num_str=1431360,
+        num_dupe=99, num_zero=0, num_negative=0, num_neg_vals=0,
+        val_min=None, val_max=None, need_bits=None,
+        len_min=2, len_max=100, seen_types=set(["string"]), fk=None,
+    )
+    col_analysis.tags.update(["FAKE_TABLE", "STRING", "NOT_NULL"])
+    a[DbdColumnId("FileData", "Filepath")] = col_analysis
+
+
 array_re = re.compile(r"\[[x0-9]+\]$")
 
 def analyze_table(a: 'AnalysisData', directory: str, tablename: str,
                   view: dbd.DbdVersionedView, fkcols: dbd.FKReferents) -> None:
     file = tablename + ".csv"
     data: Dict[str, List[str]] = {}
+
+    if tablename == "FileData":
+        return add_fake_filedata_analysis(a)
 
     try:
         with open(os.path.join(directory, file), newline="") as csvfile:

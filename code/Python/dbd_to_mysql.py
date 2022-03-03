@@ -106,7 +106,7 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
         # survey the number of referers that are signed/unsigned, and the
         # maximum integer width seen, so that we can derive the proper
         # integer type for the column in us (the referent)
-        refs_signed = refs_unsigned = 0
+        refs_signed = refs_unsigned = refs_unknown = 0
 
         assert column_data.int_width is not None
         refs_maxbits = column_data.int_width
@@ -129,19 +129,17 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
             if "IGNORE_FK" in a_referer.tags:
                 continue
 
-            # if referer_coldata.is_unsigned:
-            #     refs_unsigned += 1
-            # elif referer_col in analysis and "NEG_IS_NULL" in analysis[referer_col].tags:
-            #     referer_coldata.is_unsigned = True
-            #     refs_unsigned += 1
-            # else:
-            #     refs_signed += 1
-            if "UNSIGNED" in a_referer.tags or "NEG_IS_NULL" in a_referer.tags:
-                referer_coldata.is_unsigned = True
-                refs_unsigned += 1
+            # tables which don't have data (presumably server-side) don't get
+            # input to what the column types for a FK look like
+            if "NO_TABLE" in a_referer.tags:
+                refs_unknown += 1
             else:
-                referer_coldata.is_unsigned = False
-                refs_signed += 1
+                if "UNSIGNED" in a_referer.tags or "NEG_IS_NULL" in a_referer.tags:
+                    referer_coldata.is_unsigned = True
+                    refs_unsigned += 1
+                else:
+                    referer_coldata.is_unsigned = False
+                    refs_signed += 1
 
             assert referer_coldata.int_width is not None
             refs_maxbits = max(refs_maxbits, referer_coldata.int_width)
@@ -157,7 +155,7 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
                     f"          {referer_type}   referer: {referer_col.table}.{referer_col.column}")
 
         # no mismatches, carry on
-        if len(mismatches) == 0:
+        if len(mismatches) == 0 and refs_unknown == 0:
             continue
 
         # deal with mismatches
@@ -182,13 +180,16 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
             optional_print(
                 f"FIXUP: referent {table_name}.{column_name} -> signed: False, bits: {refs_maxbits}")
 
-            # Make our id signed
+            # Make sure the referent is set as we've figured
             column_data.is_unsigned = False
-
-            # and make our bit width consistent all the way around
             column_data.int_width = refs_maxbits
+
+            # and make everything consistent all the way around (normally this
+            # would just have an effect on bit width, but if there's an 'unknown',
+            # we want to make sure it gets set, too
             for referer_col, referer_coldata in fkcols[referent_col].items():
                 optional_print(f"      {referer_col.table}.{referer_col.column}")
+                referer_coldata.is_unsigned = False
                 referer_coldata.int_width = refs_maxbits
 
         # everything is unsigned
@@ -196,13 +197,14 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
             optional_print(
                 f"FIXUP: referent {table_name}.{column_name} -> unsigned: True, bits: {refs_maxbits}")
 
-            # Make our id signed
+            # Make sure the referent is set as we've figured
             column_data.is_unsigned = True
-
-            # and make our bit width consistent all the way around
             column_data.int_width = refs_maxbits
+
+            # and sync everything else
             for referer_col, referer_coldata in fkcols[referent_col].items():
                 optional_print(f"      {referer_col.table}.{referer_col.column}")
+                referer_coldata.is_unsigned = True
                 referer_coldata.int_width = refs_maxbits
 
         # The tables as listed in the DBDefs aren't consistent... how 'bout
@@ -211,11 +213,11 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
             optional_print(
                 f"FIXUP: referent {table_name}.{column_name} -> unsigned: False, bits: {refs_maxbits} (from analysis)")
 
-            # Make our id unsigned
+            # Make sure the referent is set as we've figured
             column_data.is_unsigned = True
-
-            # and make our bit width consistent all the way around
             column_data.int_width = refs_maxbits
+
+            # and sync everything else
             for referer_col, referer_coldata in fkcols[referent_col].items():
                 optional_print(f"      {referer_col.table}.{referer_col.column}")
                 referer_coldata.is_unsigned = True
@@ -434,15 +436,14 @@ def dumpdbd(args: argparse.Namespace, dbname: str, tablename: str,
         analysis_data = analysis.for_column(referent_col)
 
         # If we have a FK referencing another table, set that up too
-        if column.definition.fk is not None and "IGNORE_FK" not in analysis_data.tags:
+        if column.definition.fk is not None and (analysis_data is None or "IGNORE_FK" not in analysis_data.tags):
             fk_table = str(column.definition.fk.table)
             fk_col = str(column.definition.fk.column)
 
-            # FileData as a table no longer exists
-            # FIXME: Maybe we should make it exist, to make queries against
-            # it easier?
-            if fk_table == "FileData":
-                continue
+
+            # if fk_table == "FileData":
+            #     if args.no_filedata:
+            #         continue
 
             # if we have a FK, but the table pointed to doesn't exist, and we're
             # not already indexed (because we have an index, or we're the PK), make
@@ -541,6 +542,9 @@ def main() -> int:
     parser.add_argument(
         "--no-fks", "--no-foreign-keys", dest="no_fks", action='store_true', default=False,
         help="don't create foreign key constraints")
+    parser.add_argument(
+        "--no-filedata", "--no-fdid", dest="no_filedata", action='store_true', default=False,
+        help="don't create (and make FKs to) FileData table")
 
     # --only is disabled for now, since using it will cause FKs to be wrong
     # if it's used to try to generate an updated schema w/o parsing everything
@@ -624,6 +628,22 @@ def main() -> int:
     print(f"CREATE DATABASE `{args.dbname}`;")
     print(f"USE `{args.dbname}`;")
     print(metasql)
+
+    # unless the user objects, create a table for filedataids
+    # if not args.no_filedata:
+    #     print(
+    #         "CREATE TABLE IF NOT EXISTS `FileData` (\n"
+    #         "  `id` INT UNSIGNED NOT NULL,\n"
+    #         "  `Filepath` VARCHAR(256) NOT NULL,\n"
+    #         "  `Filename` VARCHAR(100) NOT NULL,\n"
+    #         "  PRIMARY KEY(`id`),\n"
+    #         "  KEY `FileData_Filepath` (`Filepath`),\n"
+    #         "  KEY `FileData_Filename` (`Filename`),\n"
+    #         "  UNIQUE KEY `FileData_Filepath_Filename` (`Filepath`, `Filename`)\n"
+    #         ") /*! ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci */;\n"
+    #         "\n"
+    #     )
+
 
     # deferred statements to add to `ALTER` at the end
     deferred = {}
