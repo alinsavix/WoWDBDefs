@@ -118,6 +118,7 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
 
         mismatches: List[str] = []
         all_cols: List[str] = []
+        ignore_cols: Set[DbdColumnId] = set()
         for referer_col, referer_coldata in fkcols[referent_col].items():
             a_referer = analysis.for_column(referer_col)
             if not a_referer:
@@ -127,6 +128,7 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
 
             # if we're supposed to ignore this FK, ignore this FK
             if "IGNORE_FK" in a_referer.tags:
+                ignore_cols.add(referer_col)
                 continue
 
             # tables which don't have data (presumably server-side) don't get
@@ -188,6 +190,9 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
             # would just have an effect on bit width, but if there's an 'unknown',
             # we want to make sure it gets set, too
             for referer_col, referer_coldata in fkcols[referent_col].items():
+                if referer_col in ignore_cols:
+                    optional_print(f"      IGNORED {referer_col.table}.{referer_col.column}")
+                    continue
                 optional_print(f"      {referer_col.table}.{referer_col.column}")
                 referer_coldata.is_unsigned = False
                 referer_coldata.int_width = refs_maxbits
@@ -203,6 +208,9 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
 
             # and sync everything else
             for referer_col, referer_coldata in fkcols[referent_col].items():
+                if referer_col in ignore_cols:
+                    optional_print(f"      IGNORED {referer_col.table}.{referer_col.column}")
+                    continue
                 optional_print(f"      {referer_col.table}.{referer_col.column}")
                 referer_coldata.is_unsigned = True
                 referer_coldata.int_width = refs_maxbits
@@ -219,6 +227,9 @@ def fk_fixup_inner(table_name: str, table_data: dbd.DbdVersionedCols,
 
             # and sync everything else
             for referer_col, referer_coldata in fkcols[referent_col].items():
+                if referer_col in ignore_cols:
+                    optional_print(f"      IGNORED {referer_col.table}.{referer_col.column}")
+                    continue
                 optional_print(f"      {referer_col.table}.{referer_col.column}")
                 referer_coldata.is_unsigned = True
                 referer_coldata.int_width = refs_maxbits
