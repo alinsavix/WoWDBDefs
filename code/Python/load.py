@@ -31,6 +31,61 @@ def get_file_hash(file: Union[str, Path]) -> str:
     return h.hexdigest()
 
 
+# FIXME: 99% identical to load_one -- deduplicate
+def load_listfile(engine, file: Path, datameta: Table) -> int:
+    print(f"Loading listfile {file}...", end="", flush=True)
+    time_prep_start = time.monotonic()
+
+    rows = []
+    with file.open("r", newline="") as listfile:
+        for line in [z.rstrip() for z in listfile]:
+            s = line.split(";")
+            if len(s) != 2:
+                print(f"ERROR: Invalid line in listfile: {line}", file=sys.stderr)
+                continue
+
+            rows.append({
+                "ID": int(s[0]),
+                "Filepath": os.path.dirname(s[1]),
+                "Filename": os.path.basename(s[1]),
+            })
+
+    time_prep_end = time.monotonic()
+    print(f" {len(rows)} rows, prepaired in {time_prep_end - time_prep_start:.2f}s", end="", flush=True)
+
+    time_load_start = time.monotonic()
+    metadata_obj = MetaData()
+
+    tablename = "FileData"
+    try:
+        tablemeta = Table(tablename, metadata_obj, autoload_with=engine)
+    except sqlalchemy.exc.NoSuchTableError:
+        print(f"ERROR: Table {tablename} not found", file=sys.stderr)
+        return 0
+
+    with engine.begin() as conn:
+        try:
+            conn.execute(text("SET SESSION foreign_key_checks = 0"))
+            conn.execute(text(f"TRUNCATE `{tablename}`"))
+            conn.execute(text(f"DELETE FROM _dbd_data_meta WHERE `table`='{tablename}'"))
+        except sqlalchemy.exc.InvalidRequestError as e:
+            print(f"ERROR: Invalid sql request for {tablename}: {e}", file=sys.stderr)
+            return 0
+
+        result = conn.execute(
+            insert(tablemeta), rows
+        )
+
+        time_load_end = time.monotonic()
+        print(f", loaded in {time_load_end - time_load_start:.2f}s", flush=True)
+
+        hash = get_file_hash(file)
+        result = conn.execute(
+            insert(datameta), {"table": tablename, "path": str(file), "hash": hash}
+        )
+
+        return len(rows)
+
 def load_one(engine, file: Path, tablename: str, analysis: AnalysisData, datameta: Table) -> int:
     print(f"Loading {tablename}...", end="", flush=True)
 
@@ -98,6 +153,7 @@ def load_one(engine, file: Path, tablename: str, analysis: AnalysisData, datamet
 
         return len(rows)
 
+
 def build_string_regex(arg_value, pat=re.compile(r"^\d+\.\d+\.\d+\.\d+$")) -> str:
     if not pat.match(arg_value):
         raise argparse.ArgumentTypeError("invalid build string (try e.g. '9.1.5.41488')")
@@ -152,6 +208,8 @@ def main() -> int:
     rows_loaded = 0
     tables_loaded = 0
 
+    load_listfile(engine, Path("listfile.csv"), data_meta)
+    sys.exit(0)
     if args.table:
         tablelist = args.table
     else:
