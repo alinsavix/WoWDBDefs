@@ -3,7 +3,7 @@ import csv
 import os
 import re
 import sys
-from typing import Dict, Any, Union, Set
+from typing import Dict, Any, Union, Set, List
 
 from pathlib import Path
 from ppretty import ppretty
@@ -31,7 +31,46 @@ def get_file_hash(file: Union[str, Path]) -> str:
     return h.hexdigest()
 
 
-# FIXME: 99% identical to load_one -- deduplicate
+def insert_rows(engine, file: Path, tablename: str, rows: List[Dict[str, Any]], datameta: Table) -> None:
+    time_load_start = time.monotonic()
+    metadata_obj = MetaData()
+
+    try:
+        tablemeta = Table(tablename, metadata_obj, autoload_with=engine)
+    except sqlalchemy.exc.NoSuchTableError as e:
+        print(f"ERROR: Table {tablename} not found in database", file=sys.stderr)
+        raise e from None
+
+    with engine.begin() as conn:
+        try:
+            conn.execute(text("SET SESSION foreign_key_checks = 0"))
+            conn.execute(text(f"TRUNCATE `{tablename}`"))
+            conn.execute(text(f"DELETE FROM _dbd_data_meta WHERE `table`='{tablename}'"))
+            # conn.execute(text(f"LOCK TABLES `{tablename}` WRITE"))
+            # conn.execute(text(f"ALTER TABLE `{tablename}` DISABLE KEYS"))
+
+        except sqlalchemy.exc.InvalidRequestError as e:
+            print(f"ERROR: Invalid sql setup request for {tablename}: {e}", file=sys.stderr)
+            raise e from None
+
+
+        result = conn.execute(
+            insert(tablemeta), rows
+        )
+        # print(result)
+
+        # conn.execute(text(f"ALTER TABLE `{tablename}` ENABLE KEYS"))
+        # conn.execute(text(f"UNLOCK TABLES"))
+
+        time_load_end = time.monotonic()
+        print(f", loaded in {time_load_end - time_load_start:.2f}s", flush=True)
+
+        hash = get_file_hash(file)
+        result = conn.execute(
+            insert(datameta), {"table": tablename, "path": str(file), "hash": hash}
+        )
+
+
 def load_listfile(engine, file: Path, datameta: Table) -> int:
     print(f"Loading listfile {file}...", end="", flush=True)
     time_prep_start = time.monotonic()
@@ -53,38 +92,9 @@ def load_listfile(engine, file: Path, datameta: Table) -> int:
     time_prep_end = time.monotonic()
     print(f" {len(rows)} rows, prepaired in {time_prep_end - time_prep_start:.2f}s", end="", flush=True)
 
-    time_load_start = time.monotonic()
-    metadata_obj = MetaData()
+    insert_rows(engine, file, "FileData", rows, datameta)
+    return len(rows)
 
-    tablename = "FileData"
-    try:
-        tablemeta = Table(tablename, metadata_obj, autoload_with=engine)
-    except sqlalchemy.exc.NoSuchTableError:
-        print(f"ERROR: Table {tablename} not found", file=sys.stderr)
-        return 0
-
-    with engine.begin() as conn:
-        try:
-            conn.execute(text("SET SESSION foreign_key_checks = 0"))
-            conn.execute(text(f"TRUNCATE `{tablename}`"))
-            conn.execute(text(f"DELETE FROM _dbd_data_meta WHERE `table`='{tablename}'"))
-        except sqlalchemy.exc.InvalidRequestError as e:
-            print(f"ERROR: Invalid sql request for {tablename}: {e}", file=sys.stderr)
-            return 0
-
-        result = conn.execute(
-            insert(tablemeta), rows
-        )
-
-        time_load_end = time.monotonic()
-        print(f", loaded in {time_load_end - time_load_start:.2f}s", flush=True)
-
-        hash = get_file_hash(file)
-        result = conn.execute(
-            insert(datameta), {"table": tablename, "path": str(file), "hash": hash}
-        )
-
-        return len(rows)
 
 def load_one(engine, file: Path, tablename: str, analysis: AnalysisData, datameta: Table) -> int:
     print(f"Loading {tablename}...", end="", flush=True)
@@ -114,44 +124,9 @@ def load_one(engine, file: Path, tablename: str, analysis: AnalysisData, datamet
     time_prep_end = time.monotonic()
     print(f" {len(rows)} rows, prepaired in {time_prep_end - time_prep_start:.2f}s", end="", flush=True)
 
-    time_load_start = time.monotonic()
-    metadata_obj = MetaData()
+    insert_rows(engine, file, tablename, rows, datameta)
 
-    try:
-        tablemeta = Table(tablename, metadata_obj, autoload_with=engine)
-    except sqlalchemy.exc.NoSuchTableError:
-        print(f"ERROR: Table {tablename} not found", file=sys.stderr)
-        return 0
-
-    with engine.begin() as conn:
-        try:
-            conn.execute(text("SET SESSION foreign_key_checks = 0"))
-            conn.execute(text(f"TRUNCATE `{tablename}`"))
-            conn.execute(text(f"DELETE FROM _dbd_data_meta WHERE `table`='{tablename}'"))
-            # conn.execute(text(f"LOCK TABLES `{tablename}` WRITE"))
-            # conn.execute(text(f"ALTER TABLE `{tablename}` DISABLE KEYS"))
-        except sqlalchemy.exc.InvalidRequestError as e:
-            print(f"ERROR: Invalid sql request for {tablename}: {e}", file=sys.stderr)
-            return 0
-
-
-        result = conn.execute(
-            insert(tablemeta), rows
-        )
-        # print(result)
-
-        # conn.execute(text(f"ALTER TABLE `{tablename}` ENABLE KEYS"))
-        # conn.execute(text(f"UNLOCK TABLES"))
-
-        time_load_end = time.monotonic()
-        print(f", loaded in {time_load_end - time_load_start:.2f}s", flush=True)
-
-        hash = get_file_hash(file)
-        result = conn.execute(
-            insert(datameta), {"table": tablename, "path": str(file), "hash": hash}
-        )
-
-        return len(rows)
+    return len(rows)
 
 
 def build_string_regex(arg_value, pat=re.compile(r"^\d+\.\d+\.\d+\.\d+$")) -> str:
@@ -169,11 +144,20 @@ def main() -> int:
         "--datadir", dest="datadir", type=Path, action='store', default=None,
         help="location of DBD data .csv files")
     parser.add_argument(
+        "--no-data", dest="no_data", action='store_true', default=False,
+        help="don't load DBD data (from csv files)")
+    parser.add_argument(
         "--build", dest="build", type=build_string_regex, default="9.2.0.42423",
         help="full build number to use for parsing")
     parser.add_argument(
         "--connect-string", dest="connect_string", type=str, action='store',
         default="mysql+pymysql://root@localhost/wowdbd")
+    parser.add_argument(
+        "--listfile", dest="listfile", type=Path, action='store', default="listfile.csv",
+        help="listfile to load")
+    parser.add_argument(
+        "--no-filedata", "--no-fdid", dest="no_filedata", action='store_true', default=False,
+        help="don't load FileData table (from listfile)")
     parser.add_argument(
         "table", nargs='*', action='store',
         help="optional list of tables to load"
@@ -202,31 +186,36 @@ def main() -> int:
     #         table_name = filename.replace(".csv", "")
     #         load_one(engine, args.datadir, table_name, analysis)
 
-    print(f"Loading data for build {build}...")
+    t_start = time.monotonic()
+    num_rows = 0
+    num_tables = 0
 
-    time_start = time.monotonic()
-    rows_loaded = 0
-    tables_loaded = 0
-
-    load_listfile(engine, Path("listfile.csv"), data_meta)
-    sys.exit(0)
-    if args.table:
-        tablelist = args.table
-    else:
-        tablelist = sorted(analysis.tablenames())
-
-    for tablename in tablelist:
-        # for tablename in ["SpellVisualKitModelAttach"]:
-        file = args.datadir / (tablename + ".csv")
-        if file.exists():
-            rows_loaded += load_one(engine, file, tablename, analysis, data_meta)
-            tables_loaded += 1
+    if not args.no_filedata:
+        if not args.listfile.is_file():
+            print(f"WARNING: Listfile '{args.listfile}' not found", file=sys.stderr)
         else:
-            print(f"WARNING: No file for {tablename}", file=sys.stderr)
+            load_listfile(engine, args.listfile, data_meta)
 
-    time_end = time.monotonic()
-    print(
-        f"DONE. Loaded {rows_loaded} rows for {tables_loaded} tables in {time_end - time_start:.2f}s")
+    if not args.no_data:
+        print(f"Loading data for build {build}...")
+
+        if args.table:
+            tablelist = args.table
+        else:
+            tablelist = sorted(analysis.tablenames())
+
+        for tablename in tablelist:
+            # for tablename in ["SpellVisualKitModelAttach"]:
+            file = args.datadir / (tablename + ".csv")
+            if file.exists():
+                num_rows += load_one(engine, file, tablename, analysis, data_meta)
+                num_tables += 1
+            else:
+                print(f"WARNING: No file for {tablename}", file=sys.stderr)
+
+        t_end = time.monotonic()
+        print(
+            f"DONE. Loaded {num_rows} rows for {num_tables} tables in {t_end - t_start:.2f}s")
 
     return 0
 

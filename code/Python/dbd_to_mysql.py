@@ -545,9 +545,6 @@ def main() -> int:
         "--show-fixups", dest="show_fixups", action='store_true', default=False,
         help="show datatype and signedness fixups made to columns")
     parser.add_argument(
-        "--no-git", dest="no_git", action='store_true', default=False,
-        help="don't include git revision in metadata")
-    parser.add_argument(
         "--no-fulltext", dest="no_fulltext", action='store_true', default=False,
         help="don't create fulltext indexes for string columns")
     parser.add_argument(
